@@ -137,6 +137,39 @@ func init() {
 		Protocols:      []string{"jsonl"},
 		Capabilities:   oneShotCapabilities(),
 	}, piFactory)
+
+	// ── dsh — DeepSeek Harness via its SDK JSON-RPC runtime ─────────
+	r.Register(AdapterMeta{
+		Type:           "dsh",
+		DisplayName:    "DeepSeek Harness",
+		RequiresBinary: "dsh",
+		DetectCommand:  "--version",
+		Protocols:      []string{"json-rpc"},
+		Capabilities:   dshCapabilities(),
+	}, dshFactory)
+}
+
+// dshCapabilities describes what this adapter integrates, not what DSH could do
+// on its own.
+//
+// Persistent conversation, resume and token usage are supported: the adapter
+// reuses one DSH session id across Send calls and reads the turn's usage chunk.
+// Resume here means the session pool keeping a live process alive; DSH also
+// rebuilds a session from its own log, but the adapter does not yet feed a stored
+// session id back on a fresh process, so a restart starts a new conversation.
+//
+// Busy message delivery and interactive input are unsupported: the SDK protocol
+// has no cancel request, so Stop ends the process instead of interrupting a turn,
+// and there is no stdin prompt path.
+func dshCapabilities() BackendCapabilities {
+	return BackendCapabilities{
+		PersistentConversation: CapabilitySupported,
+		ResumeConversation:     CapabilitySupported,
+		BusyMessageDelivery:    CapabilityUnsupported,
+		SafeStop:               CapabilityUnsupported,
+		InteractiveInput:       CapabilityUnsupported,
+		TokenUsage:             CapabilitySupported,
+	}
 }
 
 // claudeMeta builds an AdapterMeta for the claude and local backends.
@@ -231,4 +264,9 @@ func hermesFactory(cfg BackendConfig) (Backend, error) {
 func piFactory(cfg BackendConfig) (Backend, error) {
 	execPath := execPathOrDefault(cfg.ExecPath, "PI_BIN")
 	return NewPiBackend(execPath, logOrDefault(cfg.Logger)), nil
+}
+
+func dshFactory(cfg BackendConfig) (Backend, error) {
+	execPath := execPathOrDefault(cfg.ExecPath, "DSH_BIN")
+	return NewDshBackend(execPath, logOrDefault(cfg.Logger)), nil
 }
