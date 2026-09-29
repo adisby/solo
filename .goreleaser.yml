@@ -8,7 +8,7 @@ builds:
     binary: solo
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w -X github.com/solo-ai/solo/pkg/version.Version={{.Version}} -X github.com/solo-ai/solo/pkg/version.Commit={{.Commit}} -X github.com/solo-ai/solo/pkg/version.Date={{.Date}}
@@ -17,7 +17,7 @@ builds:
     binary: solo-daemon
     env:
       - CGO_ENABLED=0
-    goos: [darwin, linux]
+    goos: [darwin, linux, windows]
     goarch: [amd64, arm64]
     ldflags:
       - -s -w -X github.com/solo-ai/solo/pkg/version.Version={{.Version}} -X github.com/solo-ai/solo/pkg/version.Commit={{.Commit}} -X github.com/solo-ai/solo/pkg/version.Date={{.Date}}
@@ -26,6 +26,10 @@ archives:
   - ids: [solo, solo-daemon]
     name_template: "solo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
+    # Windows has no tar by default, so ship a zip that Expand-Archive can open.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 
 checksum:
   name_template: checksums.txt

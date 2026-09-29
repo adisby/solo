@@ -102,6 +102,59 @@ jobs:
         working-directory: frontend
         run: npx playwright test agent-evals.spec.ts --grep 'preserves infrastructure failure classification' --reporter=line
 
+  windows:
+    name: Windows build and installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Build Windows binaries
+        run: |
+          go build ./cmd/solo
+          go build ./cmd/daemon
+
+      - name: Windows unit tests for the CLI and Daemon
+        run: go test ./cmd/solo/... ./cmd/daemon/... ./pkg/agent/... -count=1
+
+      - name: PowerShell installer end to end
+        shell: pwsh
+        run: ./scripts/test-release-install.ps1
+
+      - name: Daemon autostart task lifecycle
+        shell: pwsh
+        run: |
+          # Registers and removes a uniquely named task, so it never touches a
+          # real 'Solo Daemon' task on the runner.
+          $task = "Solo Daemon CI $env:GITHUB_RUN_ID"
+          $bin = Join-Path $env:RUNNER_TEMP 'solo-autostart'
+          New-Item -ItemType Directory -Path $bin -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $bin 'solo-daemon.exe') -Value 'stub'
+          $credDir = Join-Path $env:USERPROFILE '.solo\daemon'
+          New-Item -ItemType Directory -Path $credDir -Force | Out-Null
+          $cred = Join-Path $credDir 'credentials.json'
+          $hadCredential = Test-Path $cred
+          if (-not $hadCredential) { Set-Content -LiteralPath $cred -Value '{"computer_id":"ci","credential":"ci"}' }
+          try {
+            ./scripts/autostart-daemon.ps1 -Check -TaskName $task
+            if ($LASTEXITCODE -ne 1) { throw "expected no task before enable, exit=$LASTEXITCODE" }
+            ./scripts/autostart-daemon.ps1 -Enable -BinDir $bin -TaskName $task
+            ./scripts/autostart-daemon.ps1 -Check -TaskName $task
+            if ($LASTEXITCODE -ne 0) { throw "expected the task after enable, exit=$LASTEXITCODE" }
+            ./scripts/autostart-daemon.ps1 -Disable -BinDir $bin -TaskName $task
+            ./scripts/autostart-daemon.ps1 -Check -TaskName $task
+            if ($LASTEXITCODE -ne 1) { throw "expected no task after disable, exit=$LASTEXITCODE" }
+          } finally {
+            schtasks.exe /delete /f /tn $task 2>$null
+            if (-not $hadCredential) { Remove-Item -LiteralPath $cred -Force -ErrorAction SilentlyContinue }
+          }
+
   build:
     name: Build
     runs-on: ubuntu-latest

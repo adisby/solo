@@ -56,6 +56,42 @@ curl -fsSL 'https://raw.githubusercontent.com/solo-agent/solo/master/scripts/ins
   --computer-id '...' --token '...'
 ```
 
+   On Windows, run the PowerShell installer from an elevated-free PowerShell 5.1
+   or later session instead. It installs a checksummed zip, adds
+   `%USERPROFILE%\.solo\bin` to the user PATH, pairs the Computer, and starts
+   the Daemon without a console window:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/solo-agent/solo/master/scripts/install.ps1))) `
+  -Connect -Server 'https://solo.example.com' `
+  -ComputerId '...' -Token '...'
+```
+
+   Add `-Autostart` to also register a per-user logon task, so the Daemon
+   reconnects whenever that user signs in:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/solo-agent/solo/master/scripts/install.ps1))) `
+  -Connect -Autostart -Server 'https://solo.example.com' `
+  -ComputerId '...' -Token '...'
+```
+
+   The task can be managed later without reinstalling:
+
+```powershell
+powershell -File scripts/autostart-daemon.ps1 -Status   # registered? daemon answering?
+powershell -File scripts/autostart-daemon.ps1 -Enable
+powershell -File scripts/autostart-daemon.ps1 -Disable
+```
+
+On Windows the paired credential is written to
+`%USERPROFILE%\.solo\daemon\credentials.json` with an owner-only ACL (the
+owning account, SYSTEM, and Administrators), because `os.Chmod` does not
+restrict access on Windows.
+
+The UI's **Add Computer** dialog generates both forms; pick the tab for the
+operating system of the machine you are pairing.
+
 The default Daemon stores the exchanged machine credential in `~/.solo/daemon/credentials.json` with mode `0600`. Later starts need no pairing variables because the stored Server URL and credential are reused. Provider credentials and CLI login remain local. The default Daemon listens only on `127.0.0.1:8081` for the local `solo` CLI.
 
 Manage it with `solo daemon status`, `solo daemon logs`, `solo daemon restart`,

@@ -92,6 +92,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: https://${SOLO_DOMAIN:?set SOLO_DOMAIN}
         NEXT_PUBLIC_INSTALL_URL: ${NEXT_PUBLIC_INSTALL_URL:-https://raw.githubusercontent.com/solo-agent/solo/master/scripts/install.sh}
+        NEXT_PUBLIC_INSTALL_URL_WINDOWS: ${NEXT_PUBLIC_INSTALL_URL_WINDOWS:-https://raw.githubusercontent.com/solo-agent/solo/master/scripts/install.ps1}
     restart: unless-stopped
     environment:
       HOSTNAME: 0.0.0.0
