@@ -126,6 +126,12 @@ test.describe('public remote first-user experience', () => {
     await expect(installCommand).toContainText('scripts/install.sh');
     await expect(installCommand).toContainText('bash -s -- connect');
     await expect(page.locator('pre').nth(1)).toContainText('solo daemon connect');
+    await page.getByRole('button', { name: 'Windows' }).click();
+    await expect(page.locator('pre').first()).toContainText('scripts/install.ps1');
+    await expect(page.locator('pre').first()).toContainText('-Connect -Server');
+    await expect(page.locator('pre').nth(1)).toContainText('solo daemon connect');
+    await page.getByRole('button', { name: 'macOS / Linux' }).click();
+    await expect(page.locator('pre').first()).toContainText('scripts/install.sh');
     await page.getByRole('button', { name: 'Copy' }).first().click();
     await expect(page.getByText('Command copied.')).toBeVisible();
 

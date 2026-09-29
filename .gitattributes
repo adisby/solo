@@ -1,13 +1,12 @@
-# Scripts that run on Linux (CI, servers, and the POSIX installer) must keep LF
-# line endings even when the repository is checked out on Windows, otherwise
-# `set -euo pipefail` fails with "invalid option name".
+# Shell scripts run on Linux (CI, servers, and the POSIX installer) and must
+# keep LF line endings even when the repository is checked out on Windows.
+# Without this, a Windows checkout turns them into CRLF and `set -euo pipefail`
+# fails with "invalid option name"; `make rebuild` then cannot run.
+#
+# Only the files that are executed by a POSIX shell are pinned. Pinning every
+# source type would fight core.autocrlf on Windows checkouts and report hundreds
+# of files as modified even though their content is unchanged.
 *.sh text eol=lf
-*.ps1 text eol=crlf
 
-# Go sources and build/release configuration must stay LF for the Go toolchain,
-# GoReleaser, and container builds.
-*.go text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-Dockerfile text eol=lf
-*.sql text eol=lf
+# PowerShell scripts are Windows-only; keep a native CRLF checkout.
+*.ps1 text eol=crlf

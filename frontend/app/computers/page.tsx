@@ -51,7 +51,7 @@ import { relativeTime, formatDateTime } from '@/lib/utils/time';
 import { cn } from '@/lib/utils';
 import type { Computer } from '@/lib/types';
 import { Dialog, DialogCloseButton, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { computerPairingCommands } from '@/lib/computer-pairing';
+import { computerPairingCommands, type PairingTarget } from '@/lib/computer-pairing';
 import { RuntimeLogo } from '@/components/agents/runtime-logo';
 import { isSupportedAgentRuntime } from '@/lib/agent-runtimes';
 
@@ -120,6 +120,7 @@ export default function ComputersPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [pairDialogOpen, setPairDialogOpen] = useState(false);
   const [pairingComputer, setPairingComputer] = useState<Computer | null>(null);
+  const [pairingTarget, setPairingTarget] = useState<PairingTarget>('unix');
   const [deleteTarget, setDeleteTarget] = useState<Computer | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -180,6 +181,7 @@ export default function ComputersPage() {
 
   const openPairDialog = useCallback(async () => {
     setPairingComputer(null);
+    setPairingTarget('unix');
     setPairDialogOpen(true);
     try {
       const pending = computers.find((computer) => computer.pairing_status === 'pending');
@@ -194,6 +196,7 @@ export default function ComputersPage() {
 
   const showEnrollment = useCallback(async (computer: Computer) => {
     setPairingComputer(null);
+    setPairingTarget('unix');
     setPairDialogOpen(true);
     try {
       setPairingComputer(await createEnrollment(computer.id));
@@ -228,9 +231,10 @@ export default function ComputersPage() {
     }
   }, [deleteComputer, deleteTarget, showToast]);
 
-  const pairingCommands = pairingComputer?.enrollment_token
+  const pairingCommandSets = pairingComputer?.enrollment_token
     ? computerPairingCommands(pairingComputer.id, pairingComputer.enrollment_token)
     : null;
+  const pairingCommands = pairingCommandSets?.find((commands) => commands.target === pairingTarget) ?? null;
 
   // Auth loading state
   if (authLoading || !isAuthenticated) {
@@ -407,8 +411,24 @@ export default function ComputersPage() {
         ) : (
           <div className="space-y-3">
             <p className="font-body text-sm">{t('computersPairInstructions')}</p>
+            {pairingCommandSets && (
+              <div className="flex items-center gap-2">
+                {pairingCommandSets.map((commands) => (
+                  <Button
+                    key={commands.target}
+                    type="button"
+                    size="sm"
+                    variant={pairingTarget === commands.target ? 'default' : 'outline'}
+                    aria-pressed={pairingTarget === commands.target}
+                    onClick={() => setPairingTarget(commands.target)}
+                  >
+                    {t(commands.labelKey)}
+                  </Button>
+                ))}
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2">
-              <p className="font-heading text-xs font-bold uppercase">{t('computersFreshInstall')}</p>
+              <p className="font-heading text-xs font-bold uppercase">{pairingTarget === 'windows' ? t('computersFreshInstallWindows') : t('computersFreshInstall')}</p>
               <Button type="button" size="sm" variant="outline" onClick={() => void copyPairingCommand(pairingCommands.fresh)}><Copy className="mr-1.5 h-4 w-4" />{t('copy')}</Button>
             </div>
             <pre className="overflow-x-auto border-2 border-black bg-black p-3 font-mono text-xs text-white">{pairingCommands.fresh}</pre>
