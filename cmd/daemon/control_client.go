@@ -130,7 +130,7 @@ func saveDaemonCredential(credential daemonCredential) error {
 	// as /tmp. The credential file itself remains private; only harden the
 	// default directory that Solo owns.
 	if os.Getenv("SOLO_DAEMON_CREDENTIAL_FILE") == "" {
-		if err := os.Chmod(dir, 0o700); err != nil {
+		if err := agent.RestrictDirToOwner(dir); err != nil {
 			return err
 		}
 	}
@@ -141,7 +141,9 @@ func saveDaemonCredential(credential daemonCredential) error {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o600)
+	// The credential authenticates this Computer, so it must stay private to the
+	// owning account on every platform, including caller-provided paths.
+	return agent.RestrictFileToOwner(path)
 }
 
 func (client *daemonControlClient) enroll(ctx context.Context, token string) error {

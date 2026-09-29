@@ -7,7 +7,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -20,8 +19,8 @@ import (
 // Lock file path: ~/.solo/daemon/lock.json
 //
 // On startup, AcquireLock reads the lock file. If the file exists and the
-// PID in it is still alive (using os.FindProcess + Signal(0)), the daemon
-// refuses to start. Otherwise it writes its own lock and proceeds.
+// PID in it is still alive (see IsProcessAlive for the platform probe), the
+// daemon refuses to start. Otherwise it writes its own lock and proceeds.
 //
 // On shutdown, Release removes the lock file.
 type MachineLock struct {
@@ -59,7 +58,7 @@ func AcquireLock(lockDir string, serverURL string) (*MachineLock, error) {
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return nil, fmt.Errorf("lock: create lock directory %s: %w", lockDir, err)
 	}
-	if err := os.Chmod(lockDir, 0o700); err != nil {
+	if err := RestrictDirToOwner(lockDir); err != nil {
 		return nil, fmt.Errorf("lock: secure lock directory %s: %w", lockDir, err)
 	}
 
@@ -168,23 +167,12 @@ func writeLockFile(path string, l *MachineLock) error {
 	return nil
 }
 
-// isProcessAlive checks whether a process with the given PID is still
-// running. It uses os.FindProcess + Signal(0) as a probe — signal 0 is
-// defined by POSIX as a "test for existence" that does not actually send
-// a signal. On Windows, FindProcess always succeeds and Signal(0) behavior
-// is platform-dependent, so this is a best-effort check.
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// Signal(0) — test for process existence without sending a signal.
-	return proc.Signal(syscall.Signal(0)) == nil
+// IsProcessAlive reports whether the given PID still refers to a running
+// process. It is the single liveness probe shared by the machine lock and the
+// `solo daemon` CLI; the platform implementations live in process_unix.go and
+// process_windows.go.
+func IsProcessAlive(pid int) bool {
+	return isProcessAlive(pid)
 }
 
 // CurrentUser returns a human-readable identifier for the current OS user.

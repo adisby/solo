@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/solo-ai/solo/pkg/agent"
 	"github.com/solo-ai/solo/pkg/config"
 )
 
@@ -33,12 +34,14 @@ func TestDaemonCredentialIsScopedToServerOrigin(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save credential: %v", err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat credential: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("credential mode = %v", info.Mode().Perm())
+	// Windows has no mode bits: the platform check reads the ACL and requires
+	// that the inherited grants every local account could use are gone.
+	if !agent.HasOwnerOnlyAccess(path) {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat credential: %v", err)
+		}
+		t.Fatalf("credential is readable beyond its owner: mode=%v", info.Mode().Perm())
 	}
 
 	t.Setenv("DAEMON_SERVER_URL", "http://127.0.0.1:8080")
@@ -74,11 +77,11 @@ func TestDaemonCredentialAllowsCustomFileInSharedParent(t *testing.T) {
 	if err := saveDaemonCredential(daemonCredential{ServerURL: "https://solo.example.com", ComputerID: "computer-1", Secret: "secret"}); err != nil {
 		t.Fatalf("save credential under shared parent: %v", err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("credential mode = %v, want 0600", info.Mode().Perm())
+	if !agent.HasOwnerOnlyAccess(path) {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("credential mode = %v, want owner-only", info.Mode().Perm())
 	}
 }

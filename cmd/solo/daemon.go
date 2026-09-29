@@ -14,10 +14,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/solo-ai/solo/pkg/agent"
 )
 
 type managedDaemonCredential struct {
@@ -140,12 +140,28 @@ func managedProfileCredentialPath(profile string) (string, error) {
 	return daemonProfileStatePath(profile, "credentials.json")
 }
 
+// pairedCredentialServerURL returns the Server URL recorded by a previous
+// pairing, or an empty string when this Computer is not paired yet or the file
+// cannot be read. It is best effort: a missing or malformed credential must not
+// stop the Daemon from starting and reporting the real problem itself.
+func pairedCredentialServerURL(credentialPath string) string {
+	raw, err := os.ReadFile(credentialPath)
+	if err != nil {
+		return ""
+	}
+	var credential managedDaemonCredential
+	if err := json.Unmarshal(raw, &credential); err != nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(credential.ServerURL), "/")
+}
+
 func daemonBinary() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("SOLO_DAEMON_BINARY")); configured != "" {
 		return configured, nil
 	}
 	if current, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(current), "solo-daemon")
+		candidate := filepath.Join(filepath.Dir(current), daemonExecutableName("solo-daemon"))
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			return candidate, nil
 		}
@@ -167,7 +183,7 @@ func daemonProfilePID(profile string) (int, bool) {
 		return 0, false
 	}
 	if raw, readErr := os.ReadFile(path); readErr == nil {
-		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw))); parseErr == nil && daemonProcessAlive(pid) {
+		if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw))); parseErr == nil && agent.IsProcessAlive(pid) {
 			return pid, true
 		}
 		_ = os.Remove(path)
@@ -175,19 +191,11 @@ func daemonProfilePID(profile string) (int, bool) {
 	var lock struct {
 		PID int `json:"pid"`
 	}
-	if raw, readErr := os.ReadFile(filepath.Join(filepath.Dir(path), "lock.json")); readErr == nil && json.Unmarshal(raw, &lock) == nil && daemonProcessAlive(lock.PID) {
+	if raw, readErr := os.ReadFile(filepath.Join(filepath.Dir(path), "lock.json")); readErr == nil && json.Unmarshal(raw, &lock) == nil && agent.IsProcessAlive(lock.PID) {
 		_ = os.WriteFile(path, []byte(strconv.Itoa(lock.PID)+"\n"), 0o600)
 		return lock.PID, true
 	}
 	return 0, false
-}
-
-func daemonProcessAlive(pid int) bool {
-	if pid <= 1 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	return err == nil && process.Signal(syscall.Signal(0)) == nil
 }
 
 func startManagedDaemon(extraEnv []string) error {
@@ -230,18 +238,25 @@ func startManagedDaemonProfile(profile string, extraEnv []string) error {
 		return err
 	}
 	stateDir := filepath.Dir(logPath)
-	cmd.Env = append(os.Environ(),
-		"SOLO_DAEMON_CREDENTIAL_FILE="+credentialPath,
-		"SOLO_DAEMON_STATE_DIR="+stateDir,
-		"SOLO_DAEMON_PROFILE="+profile,
-		"DAEMON_ID=daemon-"+profile,
-		"DAEMON_PORT="+strconv.Itoa(port),
-	)
+	environment := []string{
+		"SOLO_DAEMON_CREDENTIAL_FILE=" + credentialPath,
+		"SOLO_DAEMON_STATE_DIR=" + stateDir,
+		"SOLO_DAEMON_PROFILE=" + profile,
+		"DAEMON_ID=daemon-" + profile,
+		"DAEMON_PORT=" + strconv.Itoa(port),
+	}
+	// A managed Daemon reads its Server from the paired credential. Passing the
+	// paired URL through as well keeps the machine lock's diagnostic server_url
+	// truthful instead of recording the built-in default.
+	if pairedServerURL := pairedCredentialServerURL(credentialPath); pairedServerURL != "" {
+		environment = append(environment, "DAEMON_SERVER_URL="+pairedServerURL)
+	}
+	cmd.Env = append(os.Environ(), environment...)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	configureDetachedProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -278,7 +293,7 @@ func stopManagedDaemonProfile(profile string) error {
 	if err != nil {
 		return err
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := requestDaemonStop(process); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
