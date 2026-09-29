@@ -70,6 +70,7 @@ docs/*
 docs/releases/*
 !docs/releases/agent-channel-scope.md
 !docs/remote-server.md
+!docs/dsh-backend.md
 !docs/design/
 docs/design/*
 !docs/design/remote-runtime-architecture.md
