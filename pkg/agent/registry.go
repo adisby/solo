@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -68,12 +69,18 @@ func (c BackendCapabilities) normalized() BackendCapabilities {
 
 // AdapterMeta describes a registered backend adapter for discovery and UI.
 type AdapterMeta struct {
-	Type           string              `json:"type"`            // "claude", "codex", "opencode"...
-	DisplayName    string              `json:"display_name"`    // "Claude Code", "Codex CLI"
-	RequiresBinary string              `json:"requires_binary"` // CLI binary name, e.g. "claude", "codex", "opencode"
-	DetectCommand  string              `json:"-"`               // e.g. "--version"
-	Protocols      []string            `json:"protocols"`       // "stream-json", "json-rpc", "acp", "jsonl"
-	Capabilities   BackendCapabilities `json:"capabilities"`
+	Type           string `json:"type"`            // "claude", "codex", "opencode"...
+	DisplayName    string `json:"display_name"`    // "Claude Code", "Codex CLI"
+	RequiresBinary string `json:"requires_binary"` // CLI binary name, e.g. "claude", "codex", "opencode"
+	DetectCommand  string `json:"-"`               // e.g. "--version"
+	// BinaryOverrideEnv names environment variables that may point at the
+	// executable instead of RequiresBinary being on PATH, in priority order.
+	// The factories already honour these when launching, so detection has to
+	// honour them too: otherwise a runtime that launches perfectly is reported as
+	// unavailable and the UI never offers it. Example: DSH_BIN for dsh.
+	BinaryOverrideEnv []string            `json:"-"`
+	Protocols         []string            `json:"protocols"` // "stream-json", "json-rpc", "acp", "jsonl"
+	Capabilities      BackendCapabilities `json:"capabilities"`
 }
 
 // Meta returns the registered metadata for typ.
@@ -136,9 +143,10 @@ type BackendStatus struct {
 	Error       string `json:"error,omitempty"`
 }
 
-// Detect checks every registered backend for local availability by looking up
-// its binary with exec.LookPath. If found and a DetectCommand is configured, it
-// also captures the version output. Each check is capped at 5 seconds.
+// Detect checks every registered backend for local availability by resolving its
+// executable, preferring the declared BinaryOverrideEnv variables over PATH. If
+// found and a DetectCommand is configured, it also captures the version output.
+// Each check is capped at 5 seconds.
 func (r *BackendRegistry) Detect() []BackendStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -150,7 +158,7 @@ func (r *BackendRegistry) Detect() []BackendStatus {
 			DisplayName: entry.Meta.DisplayName,
 			Binary:      entry.Meta.RequiresBinary,
 		}
-		path, err := exec.LookPath(entry.Meta.RequiresBinary)
+		path, err := resolveBackendBinary(entry.Meta)
 		if err != nil {
 			status.Available = false
 			status.Error = err.Error()
@@ -172,6 +180,26 @@ func (r *BackendRegistry) Detect() []BackendStatus {
 		results = append(results, status)
 	}
 	return results
+}
+
+// resolveBackendBinary finds the executable for one backend.
+//
+// A BinaryOverrideEnv variable that is set takes precedence over PATH, which
+// mirrors what the backend's factory does when it builds the command. Falling
+// back to PATH keeps the documented "…or the binary on PATH" behaviour.
+func resolveBackendBinary(meta AdapterMeta) (string, error) {
+	for _, name := range meta.BinaryOverrideEnv {
+		override := strings.TrimSpace(os.Getenv(name))
+		if override == "" {
+			continue
+		}
+		path, err := exec.LookPath(override)
+		if err != nil {
+			return "", fmt.Errorf("%s=%s: %w", name, override, err)
+		}
+		return path, nil
+	}
+	return exec.LookPath(meta.RequiresBinary)
 }
 
 // ListMeta returns a snapshot of AdapterMeta for every registered backend.

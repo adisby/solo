@@ -40,112 +40,125 @@ func init() {
 
 	// ── codex — Codex CLI via JSON-RPC ───────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "codex",
-		DisplayName:    "Codex CLI",
-		RequiresBinary: "codex",
-		DetectCommand:  "--version",
-		Protocols:      []string{"json-rpc"},
-		Capabilities:   persistentCapabilities(CapabilitySupported),
+		Type:              "codex",
+		DisplayName:       "Codex CLI",
+		RequiresBinary:    "codex",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"CODEX_BIN"},
+		Protocols:         []string{"json-rpc"},
+		Capabilities:      persistentCapabilities(CapabilitySupported),
 	}, codexFactory)
 
 	// ── opencode — OpenCode CLI via ACP ─────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "opencode",
-		DisplayName:    "OpenCode CLI",
-		RequiresBinary: "opencode",
-		DetectCommand:  "--version",
-		Protocols:      []string{"acp"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              "opencode",
+		DisplayName:       "OpenCode CLI",
+		RequiresBinary:    "opencode",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"OPENCODE_BIN"},
+		Protocols:         []string{"acp"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}, opencodeFactory)
 
 	// ── cursor — Cursor Agent CLI via stream-json ───────────────────
 	r.Register(AdapterMeta{
-		Type:           "cursor",
-		DisplayName:    "Cursor Agent",
-		RequiresBinary: "cursor-agent",
-		DetectCommand:  "--version",
-		Protocols:      []string{"stream-json"},
-		Capabilities:   oneShotCapabilities(),
+		Type:              "cursor",
+		DisplayName:       "Cursor Agent",
+		RequiresBinary:    "cursor-agent",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"CURSOR_BIN"},
+		Protocols:         []string{"stream-json"},
+		Capabilities:      oneShotCapabilities(),
 	}, cursorFactory)
 
 	// ── gemini — Google Gemini CLI via stream-json ──────────────────
 	r.Register(AdapterMeta{
-		Type:           "gemini",
-		DisplayName:    "Gemini CLI",
-		RequiresBinary: "gemini",
-		DetectCommand:  "--version",
-		Protocols:      []string{"stream-json"},
-		Capabilities:   oneShotCapabilities(),
+		Type:              "gemini",
+		DisplayName:       "Gemini CLI",
+		RequiresBinary:    "gemini",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"GEMINI_BIN"},
+		Protocols:         []string{"stream-json"},
+		Capabilities:      oneShotCapabilities(),
 	}, geminiFactory)
 
 	// ── kimi — Kimi CLI via ACP ─────────────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "kimi",
-		DisplayName:    "Kimi CLI",
-		RequiresBinary: "kimi",
-		DetectCommand:  "--version",
-		Protocols:      []string{"acp"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              "kimi",
+		DisplayName:       "Kimi CLI",
+		RequiresBinary:    "kimi",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"KIMI_BIN"},
+		Protocols:         []string{"acp"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}, kimiFactory)
 
 	// ── kiro — Kiro CLI via ACP ─────────────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "kiro",
-		DisplayName:    "Kiro CLI",
-		RequiresBinary: "kiro-cli",
-		DetectCommand:  "--version",
-		Protocols:      []string{"acp"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              "kiro",
+		DisplayName:       "Kiro CLI",
+		RequiresBinary:    "kiro-cli",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"KIRO_BIN"},
+		Protocols:         []string{"acp"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}, kiroFactory)
 
 	// ── copilot — GitHub Copilot CLI via JSONL ──────────────────────
 	r.Register(AdapterMeta{
-		Type:           "copilot",
-		DisplayName:    "GitHub Copilot",
-		RequiresBinary: "copilot",
-		DetectCommand:  "--version",
-		Protocols:      []string{"jsonl"},
-		Capabilities:   oneShotCapabilities(),
+		Type:              "copilot",
+		DisplayName:       "GitHub Copilot",
+		RequiresBinary:    "copilot",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"COPILOT_BIN"},
+		Protocols:         []string{"jsonl"},
+		Capabilities:      oneShotCapabilities(),
 	}, copilotFactory)
 
 	// ── openclaw — OpenClaw Agent CLI via ACP ───────────────────────
 	r.Register(AdapterMeta{
-		Type:           "openclaw",
-		DisplayName:    "OpenClaw Agent",
-		RequiresBinary: "openclaw",
-		DetectCommand:  "--version",
-		Protocols:      []string{"acp"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              "openclaw",
+		DisplayName:       "OpenClaw Agent",
+		RequiresBinary:    "openclaw",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"OPENCLAW_BIN"},
+		Protocols:         []string{"acp"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}, openclawFactory)
 
 	// ── hermes — Hermes CLI via ACP ─────────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "hermes",
-		DisplayName:    "Hermes CLI",
-		RequiresBinary: "hermes",
-		DetectCommand:  "--version",
-		Protocols:      []string{"acp"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              "hermes",
+		DisplayName:       "Hermes CLI",
+		RequiresBinary:    "hermes",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"HERMES_BIN"},
+		Protocols:         []string{"acp"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}, hermesFactory)
 
 	// ── pi — Pi CLI via JSONL ───────────────────────────────────────
 	r.Register(AdapterMeta{
-		Type:           "pi",
-		DisplayName:    "Pi CLI",
-		RequiresBinary: "pi",
-		DetectCommand:  "--version",
-		Protocols:      []string{"jsonl"},
-		Capabilities:   oneShotCapabilities(),
+		Type:              "pi",
+		DisplayName:       "Pi CLI",
+		RequiresBinary:    "pi",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"PI_BIN"},
+		Protocols:         []string{"jsonl"},
+		Capabilities:      oneShotCapabilities(),
 	}, piFactory)
 
 	// ── dsh — DeepSeek Harness via its SDK JSON-RPC runtime ─────────
+	// DSH_BIN normally points at a .js entry point, which is executable via its
+	// own shebang, so detection can resolve and version-probe it directly.
 	r.Register(AdapterMeta{
-		Type:           "dsh",
-		DisplayName:    "DeepSeek Harness",
-		RequiresBinary: "dsh",
-		DetectCommand:  "--version",
-		Protocols:      []string{"json-rpc"},
-		Capabilities:   dshCapabilities(),
+		Type:              "dsh",
+		DisplayName:       "DeepSeek Harness",
+		RequiresBinary:    "dsh",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"DSH_BIN"},
+		Protocols:         []string{"json-rpc"},
+		Capabilities:      dshCapabilities(),
 	}, dshFactory)
 }
 
@@ -176,12 +189,13 @@ func dshCapabilities() BackendCapabilities {
 // They share the same metadata except for their Type and DisplayName fields.
 func claudeMeta(typ, displayName string) AdapterMeta {
 	return AdapterMeta{
-		Type:           typ,
-		DisplayName:    displayName,
-		RequiresBinary: "claude",
-		DetectCommand:  "--version",
-		Protocols:      []string{"stream-json"},
-		Capabilities:   persistentCapabilities(CapabilityUnsupported),
+		Type:              typ,
+		DisplayName:       displayName,
+		RequiresBinary:    "claude",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"CLAUDE_BIN", "CLAUDECODE_BIN"},
+		Protocols:         []string{"stream-json"},
+		Capabilities:      persistentCapabilities(CapabilityUnsupported),
 	}
 }
 
