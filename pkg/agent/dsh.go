@@ -29,10 +29,21 @@ import (
 //	<- session.status  { sessionId, status }  idle | running
 //	<- subagent.started / subagent.finished
 //
+// Turn output arrives as session events. Observed against DSH 0.1.6-alpha.2, the
+// runtime reports a *completed* assistant message rather than per-delta chunks:
+//
+//	assistant/message { turn, step, message: { content: [...] }, usage, stream }
+//
+// so that event is the primary source of text, reasoning, tool calls and token
+// usage. The finer-grained `assistant/chunk` shape (reasoning-delta,
+// tool-call-delta, block-end, usage, finish) is also handled: an interrupted turn
+// emits deltas without a completed message, and the message's own `stream` array
+// carries them.
+//
 // A prompt for an unknown sessionId lazily creates the agent+session pair, so a
 // single subprocess serves every turn of one Solo agent: reusing the sessionId
-// carries the full conversation, and resuming a stored sessionId later in a new
-// process rebuilds it from DSH's own session log.
+// carries the full conversation. DSH can rebuild a session from its own log, but
+// this adapter always mints a fresh id, so a restart starts a new conversation.
 type DshBackend struct {
 	executablePath string
 	logger         *slog.Logger
@@ -384,6 +395,10 @@ func (c *dshClient) handleSessionEvent(event dshSessionEvent) {
 	switch event.Type {
 	case "assistant/chunk":
 		c.handleAssistantChunk(event.Data)
+	case "assistant/message":
+		// The SDK runtime delivers a completed assistant message rather than
+		// per-delta chunks, so this event is the primary source of turn output.
+		c.handleAssistantMessage(event.Data)
 	case "turn/end":
 		var data struct {
 			Reason struct {
@@ -499,6 +514,103 @@ func dshToolInput(fragment string) map[string]any {
 		return map[string]any{"_raw": fragment}
 	}
 	return parsed
+}
+
+// dshAssistantMessage is the completed assistant turn the SDK runtime reports.
+// It carries the final content blocks and the turn's token usage; the individual
+// deltas live inside `stream` and are only inspected for messages that were
+// interrupted before a block completed.
+type dshAssistantMessage struct {
+	Turn    int `json:"turn"`
+	Message struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type      string `json:"type"`
+			Text      string `json:"text"`
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"content"`
+	} `json:"message"`
+	Usage *struct {
+		InputTokens      int64 `json:"inputTokens"`
+		OutputTokens     int64 `json:"outputTokens"`
+		CacheReadTokens  int64 `json:"cacheReadTokens"`
+		CacheWriteTokens int64 `json:"cacheWriteTokens"`
+	} `json:"usage"`
+	Stream []struct {
+		Chunk dshChunk `json:"chunk"`
+	} `json:"stream"`
+}
+
+func (c *dshClient) handleAssistantMessage(raw json.RawMessage) {
+	var data dshAssistantMessage
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return
+	}
+	if data.Usage != nil {
+		c.usageMu.Lock()
+		c.usage = TokenUsage{
+			InputTokens:      data.Usage.InputTokens,
+			OutputTokens:     data.Usage.OutputTokens,
+			CacheReadTokens:  data.Usage.CacheReadTokens,
+			CacheWriteTokens: data.Usage.CacheWriteTokens,
+		}
+		c.usageMu.Unlock()
+	}
+
+	emittedText, emittedTool := false, false
+	for _, block := range data.Message.Content {
+		switch block.Type {
+		case "text":
+			if block.Text == "" {
+				continue
+			}
+			emittedText = true
+			c.markText()
+			c.emit(OutputChunk{Type: string(MessageText), Content: block.Text})
+		case "reasoning":
+			if block.Text == "" {
+				continue
+			}
+			c.emit(OutputChunk{Type: string(MessageThinking), Content: block.Text})
+		case "tool-call":
+			emittedTool = true
+			c.emit(OutputChunk{Type: string(MessageToolUse), Tool: dshToolCall(block.Name, block.ID, block.Arguments)})
+		}
+	}
+
+	// A message that never completed a block (interrupted or aborted turn) still
+	// streamed deltas; surface those only when the final blocks were absent so
+	// nothing is reported twice.
+	if emittedText && emittedTool {
+		return
+	}
+	for _, entry := range data.Stream {
+		switch entry.Chunk.Type {
+		case "reasoning-delta":
+			if !emittedText && entry.Chunk.Text != "" {
+				c.emit(OutputChunk{Type: string(MessageThinking), Content: entry.Chunk.Text})
+			}
+		case "tool-call-delta":
+			if !emittedTool {
+				c.emit(OutputChunk{
+					Type: string(MessageToolUse),
+					Tool: dshToolCall(entry.Chunk.Name, entry.Chunk.ID, entry.Chunk.Delta),
+				})
+			}
+		}
+	}
+}
+
+// dshToolCall builds a tool-use payload from either a completed block or a
+// streamed argument fragment.
+func dshToolCall(name, id, arguments string) *ToolInfo {
+	info := &ToolInfo{Name: name, CallID: id}
+	if arguments = strings.TrimSpace(arguments); arguments != "" {
+		info.Input = dshToolInput(arguments)
+	}
+	return info
 }
 
 func (c *dshClient) markText() {
@@ -617,6 +729,11 @@ type dshTurn struct {
 	settled      chan struct{}
 	finishOnce   sync.Once
 	startedAt    time.Time
+	// text accumulates the assistant text emitted during the turn. It is
+	// guarded because chunks are delivered from the process reader goroutine
+	// while completion is signalled from the same goroutine but read by callers.
+	textMu sync.Mutex
+	text   strings.Builder
 }
 
 func newDshTurn() *dshTurn {
@@ -634,6 +751,11 @@ func (t *dshTurn) finish(result *Result) {
 		if result.DurationMs == 0 {
 			result.DurationMs = time.Since(t.startedAt).Milliseconds()
 		}
+		if result.Output == "" {
+			t.textMu.Lock()
+			result.Output = t.text.String()
+			t.textMu.Unlock()
+		}
 		t.resCh <- result
 		close(t.deliveryDone)
 		close(t.msgCh)
@@ -648,6 +770,11 @@ func (t *dshTurn) emit(chunk OutputChunk) {
 	if chunk.Context != nil {
 		sendContextChunk(t.deliveryDone, t.msgCh, chunk)
 		return
+	}
+	if chunk.Type == string(MessageText) {
+		t.textMu.Lock()
+		t.text.WriteString(chunk.Content)
+		t.textMu.Unlock()
 	}
 	trySend(t.msgCh, chunk)
 }

@@ -66,10 +66,16 @@ func TestDshBackendExecuteAgainstRealRuntime(t *testing.T) {
 			if result.Status != "completed" {
 				t.Fatalf("turn status = %q (error=%q)", result.Status, result.Error)
 			}
-			if strings.TrimSpace(text.String()) == "" && result.Output == "" {
+			// Result.Output is the contract consumers rely on; the streamed
+			// accumulator is a fallback for backends that only emit deltas.
+			produced := strings.TrimSpace(result.Output)
+			if produced == "" {
+				produced = strings.TrimSpace(text.String())
+			}
+			if produced == "" {
 				t.Fatalf("completed turn produced no text (usage=%v init=%v)", result.Usage, result.InitInfo)
 			}
-			t.Logf("dsh turn completed: usage=%v text=%.120q", result.Usage, text.String())
+			t.Logf("dsh turn completed: usage=%v output=%.120q", result.Usage, produced)
 			return
 		case <-deadline:
 			t.Fatalf("timed out waiting for the DSH turn (partial text=%q)", text.String())

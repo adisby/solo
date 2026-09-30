@@ -102,30 +102,26 @@ func runFakeDshRuntime() {
 			if len(params.ContentBlocks) > 0 {
 				promptText = params.ContentBlocks[0].Text
 			}
-			emitEvent(out, params.SessionID, "assistant/chunk", map[string]any{
-				"chunk": map[string]any{"type": "reasoning-delta", "index": 0, "text": "thinking..."},
-			})
-			emitEvent(out, params.SessionID, "assistant/chunk", map[string]any{
-				"chunk": map[string]any{"type": "tool-call-delta", "index": 0, "id": "call-1", "name": "read", "argumentsDelta": `{"path":"a.txt"}`},
-			})
-			// The text reports the session id and this session's turn number, so a
-			// caller can assert both session identity and continued history.
-			emitEvent(out, params.SessionID, "assistant/chunk", map[string]any{
-				"chunk": map[string]any{
-					"type": "block-end", "index": 0,
-					"block": map[string]any{
-						"type": "text",
-						"text": fmt.Sprintf("session=%s turn=%d prompt=%s", params.SessionID, sessionTurn, promptText),
+			// The real SDK runtime reports a completed assistant message rather
+			// than per-delta chunks, so the fixture emits that shape: it is what
+			// the adapter consumes in production. The text also carries the
+			// session id and this session's turn number, so callers can assert
+			// session identity and continued history.
+			emitEvent(out, params.SessionID, "assistant/message", map[string]any{
+				"turn": sessionTurn,
+				"step": 1,
+				"message": map[string]any{
+					"role": "assistant",
+					"content": []map[string]any{
+						{"type": "reasoning", "text": "thinking..."},
+						{"type": "tool-call", "id": "call-1", "name": "read", "arguments": `{"path":"a.txt"}`},
+						{"type": "text", "text": fmt.Sprintf("session=%s turn=%d prompt=%s", params.SessionID, sessionTurn, promptText)},
 					},
+					"source": map[string]any{"kind": "model", "provider": "fake", "model": "fake"},
 				},
-			})
-			emitEvent(out, params.SessionID, "assistant/chunk", map[string]any{
-				"chunk": map[string]any{
-					"type": "usage",
-					"usage": map[string]any{
-						"inputTokens": 11, "outputTokens": 7, "totalTokens": 18,
-						"cacheReadTokens": 0, "cacheWriteTokens": 0, "reasoningTokens": 3,
-					},
+				"usage": map[string]any{
+					"inputTokens": 11, "outputTokens": 7, "totalTokens": 18,
+					"cacheReadTokens": 0, "cacheWriteTokens": 0, "reasoningTokens": 3,
 				},
 			})
 			writeFrame(out, map[string]any{

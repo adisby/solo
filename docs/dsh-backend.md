@@ -14,23 +14,37 @@ Daemon resolves the executable from `DSH_BIN` (or `dsh` on `PATH`).
 |---|---|
 | `initialize { cwd, provider, model, reasoningEffort }` | handshake per process; `cwd` is the Agent workspace |
 | `session/prompt { sessionId, contentBlocks }` | one turn; an unknown `sessionId` lazily creates the session |
-| `session.event` → `assistant/chunk` `reasoning-delta` | `thinking` output chunk |
-| `session.event` → `assistant/chunk` `tool-call-delta` | `tool_use` output chunk |
-| `session.event` → `assistant/chunk` `block-end` (text) | `text` output chunk |
-| `session.event` → `assistant/chunk` `usage` | turn `Result.Usage` for the configured model |
+| `session.event` → `assistant/message` | primary turn output: `reasoning` and `text` content blocks become `thinking` and `text` chunks, `tool-call` becomes `tool_use`, and `usage` becomes the turn's `Result.Usage`. The accumulated text also lands in `Result.Output` |
+| `session.event` → `assistant/chunk` | the finer-grained shape (`reasoning-delta`, `tool-call-delta`, `block-end`, `usage`, `finish`), used for turns that end before a message completes |
 | `session.event` → `turn/end` | turn outcome: `completed`, `cancelled`, or `failed` |
 | `session.status` → `running` | `status` output chunk (the resting `idle` is not turn output) |
 | `shutdown` | graceful close on session teardown |
 
-Reusing one `sessionId` across turns keeps the conversation, so persistent
-sessions and resume need no extra protocol. The SDK protocol has no cancel
-request, so `Stop` ends the process instead of interrupting a turn.
+Observed against DSH 0.1.6-alpha.2: the SDK runtime reports a **completed
+`assistant/message`**, not per-delta chunks. Handling only `assistant/chunk`
+produces a turn that completes with no output at all.
+
+Reusing one `sessionId` across turns keeps the conversation, so the persistent
+path needs no extra protocol. The adapter always mints a fresh id for a new
+process, so a restart starts a new conversation even though DSH could rebuild the
+old one from its session log. The SDK protocol has no cancel request, so `Stop`
+ends the process instead of interrupting a turn.
 
 ## Requirements
 
 1. **DSH with an `sdk` profile.** `sdk` is not a shipped profile name; create it
-   from the SDK bundle. `@deepseek-ai/dsh-sdk-app` is an incremental layer that
-   expects the plugins `dsh-base` provides, so both bundles are needed:
+   from the SDK bundle. `@deepseek-ai/dsh-sdk-app` builds its own Cordis tree with
+   an `insert:` list and deliberately does **not** layer over
+   `@deepseek-ai/dsh-base`, so two things dsh-base would otherwise provide are
+   missing and must be restored by an overlay:
+
+   - **the credentials service.** Without `@deepseek-ai/dsh-credentials-local`,
+     `llm-deepseek`'s `apiKeyEnv: DEEPSEEK_API_KEY` has nothing to read from and
+     every turn fails with `no API key for provider route "deepseek-official"`,
+     even though `dsh headless` works fine with the same home.
+   - **zstd session-log compression.** The bundle pins session persistence to
+     `compression: none`, which conflicts with a home whose logs another profile
+     wrote as `.jsonl.zstd`.
 
    `$DSH_HOME/profiles/sdk/package.json`
 
@@ -51,31 +65,35 @@ request, so `Stop` ends the process instead of interrupting a turn.
 
    `$DSH_HOME/profiles/sdk/cordis.yml` containing `[]`.
 
-   Verify without starting a session:
-
-   ```
-   dsh --profile sdk --dump-config
-   ```
-
-2. **Session-log compression must match the DSH home.** `dsh-sdk-minimal` pins
-   session persistence to `compression: none`, but a DSH home whose sessions were
-   written by another profile uses `zstd`, and the persistence layer refuses to
-   read a mismatched artifact. Apply an overlay instead of editing the bundle:
+   `$DSH_HOME/solo-sdk-overlay.yml` (passed as `DSH_PATCH`)
 
    ```yaml
+   - insert:
+       - id: credentials
+         name: '@deepseek-ai/dsh-credentials-local'
+
    - id: sessions
      config:
        root: !!js dshHomePath('sessions')
        compression: zstd
    ```
 
-   Pass it with `DSH_PATCH=<path>` (the launcher accepts `--patch` repeatedly),
-   and note that an `id:` entry **replaces** the whole config block, so `root`
-   must be repeated.
+   Note that an `id:` entry **replaces** that entry's whole config block, which is
+   why `root` is repeated for the sessions override.
 
-3. **Credentials.** The `deepseek-official` route reads `DEEPSEEK_API_KEY`
+   Verify without starting a session:
+
+   ```
+   dsh --profile sdk --patch "$DSH_HOME/solo-sdk-overlay.yml" --dump-config
+   ```
+
+2. **Credentials.** The `deepseek-official` route reads `DEEPSEEK_API_KEY`
    through DSH's credentials service (`$DSH_HOME/.credentials.yaml`, written by
    the DSH web Models page) or from the environment of the launching process.
+   The Models page shows the stored key read-only; to replace it, revoke the key
+   in the provider console, create a new one, and write it into
+   `refs.DEEPSEEK_API_KEY`. Never touch the `secret:` field: it is the encryption
+   material for the whole document.
 
 ## Environment variables
 
@@ -109,7 +127,8 @@ SOLO_E2E_DSH=1 DSH_BIN=/path/to/dsh go test ./pkg/agent/ \
 | Symptom | Cause |
 |---|---|
 | `unknown option '--permission-mode'` | The permission mode was passed as a flag. It belongs in `DSH_PERMISSION_MODE`. |
-| `no API key for provider route` | The credentials service has no `DEEPSEEK_API_KEY` and the environment does not either. |
-| `uses .jsonl.zstd, but this backend is configured for compression "none"` | The session compression overlay is missing (see requirement 2). |
+| `no API key for provider route` while `dsh headless` works | The `sdk` profile is missing the `credentials` service (requirement 1). |
+| A turn completes with no output and no usage | The adapter only saw `turn/end`; the runtime reported `assistant/message`, which must be handled (see the mapping table). |
+| `uses .jsonl.zstd, but this backend is configured for compression "none"` | The session compression overlay is missing (requirement 1). |
 | `$.root missing required value` | A patch override dropped `root`; an `id:` entry replaces the whole config block. |
 | `dsh process exited unexpectedly` during initialize | The launcher failed to boot, usually a missing or invalid profile. Run `dsh --profile sdk --dump-config` to see why. |
