@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,18 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// normalizeInventory converts an absent or JSON-null inventory into a SQL NULL so
+// that COALESCE keeps whatever is already stored. A real payload — including an
+// all-unavailable detection result — passes through and overwrites, which is the
+// point of refreshing it on every heartbeat.
+func normalizeInventory(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return trimmed
+}
 
 // ComputerService handles computer (daemon host) persistence and queries.
 type ComputerService struct {
@@ -243,18 +256,25 @@ func (s *ComputerService) DeleteComputer(ctx context.Context, id, userID string)
 // daemon_id. This is called during daemon registration.
 // If ownerID is empty the computer is created unclaimed (owner_id = NULL);
 // the user claims it later via ClaimComputer.
-func (s *ComputerService) UpsertComputerByDaemonID(ctx context.Context, daemonID, daemonURL, ownerID string, sysinfo ComputerSystemInfo) error {
+//
+// inventory is the daemon's CLI detection result. The paired control channel
+// already records it (see MarkComputerConnected), but this unpaired
+// local-compatibility path used to drop it, which left the local development
+// stack unable to offer any runtime in the Agent form or onboarding. An absent
+// value — an older daemon — preserves whatever is already stored.
+func (s *ComputerService) UpsertComputerByDaemonID(ctx context.Context, daemonID, daemonURL, ownerID string, sysinfo ComputerSystemInfo, inventory json.RawMessage) error {
 	now := time.Now()
 	name := sysinfo.Hostname
 	if name == "" {
 		name = daemonID
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO computers (name, owner_id, daemon_id, daemon_url, status, os, hostname, ip, last_heartbeat, updated_at)
-		 VALUES ($1, NULLIF($2, '')::uuid, $3, $4, 'online', $5, $6, $7, $8, $8)
+		`INSERT INTO computers (name, owner_id, daemon_id, daemon_url, status, os, hostname, ip, last_heartbeat, updated_at, runtime_inventory)
+		 VALUES ($1, NULLIF($2, '')::uuid, $3, $4, 'online', $5, $6, $7, $8, $8, COALESCE($9, '[]'::jsonb))
 		 ON CONFLICT (daemon_id) WHERE daemon_id IS NOT NULL
-		 DO UPDATE SET daemon_url = $4, status = 'online', os = $5, hostname = $6, ip = $7, last_heartbeat = $8, updated_at = $8`,
-		name, ownerID, daemonID, daemonURL, sysinfo.OS, sysinfo.Hostname, sysinfo.IP, now,
+		 DO UPDATE SET daemon_url = $4, status = 'online', os = $5, hostname = $6, ip = $7, last_heartbeat = $8, updated_at = $8,
+		               runtime_inventory = COALESCE($9, computers.runtime_inventory)`,
+		name, ownerID, daemonID, daemonURL, sysinfo.OS, sysinfo.Hostname, sysinfo.IP, now, normalizeInventory(inventory),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert computer: %w", err)
@@ -272,7 +292,7 @@ func (s *ComputerService) UpsertComputerByDaemonID(ctx context.Context, daemonID
 // identified by daemon_id. Called on daemon heartbeat.
 // Returns an error if no computer row matched — this signals the daemon should
 // re-register to recreate the missing row.
-func (s *ComputerService) UpdateHeartbeat(ctx context.Context, daemonID, daemonURL string, agentIDs []string, sysinfo ComputerSystemInfo) error {
+func (s *ComputerService) UpdateHeartbeat(ctx context.Context, daemonID, daemonURL string, agentIDs []string, sysinfo ComputerSystemInfo, inventory json.RawMessage) error {
 	now := time.Now()
 	activeAgentIDs, err := s.activeAgentIDs(ctx, agentIDs)
 	if err != nil {
@@ -280,9 +300,10 @@ func (s *ComputerService) UpdateHeartbeat(ctx context.Context, daemonID, daemonU
 	}
 	result, err := s.pool.Exec(ctx,
 		`UPDATE computers SET status = 'online', last_heartbeat = $1, daemon_url = $2,
-		        agent_ids = $3, os = $4, hostname = $5, ip = $6, updated_at = $1
-		 WHERE daemon_id = $7`,
-		now, daemonURL, activeAgentIDs, sysinfo.OS, sysinfo.Hostname, sysinfo.IP, daemonID,
+		        agent_ids = $3, os = $4, hostname = $5, ip = $6, updated_at = $1,
+		        runtime_inventory = COALESCE($7, runtime_inventory)
+		 WHERE daemon_id = $8`,
+		now, daemonURL, activeAgentIDs, sysinfo.OS, sysinfo.Hostname, sysinfo.IP, normalizeInventory(inventory), daemonID,
 	)
 	if err != nil {
 		return fmt.Errorf("update heartbeat: %w", err)

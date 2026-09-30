@@ -77,7 +77,7 @@ func (h *DaemonHandler) Register(w http.ResponseWriter, r *http.Request) {
 			Hostname: req.SystemInfo.Hostname,
 			IP:       req.SystemInfo.IP,
 		}
-		if err := h.computerSvc.UpsertComputerByDaemonID(r.Context(), req.DaemonID, daemonURL, "", sysinfo); err != nil {
+		if err := h.computerSvc.UpsertComputerByDaemonID(r.Context(), req.DaemonID, daemonURL, "", sysinfo, req.RuntimeInventory); err != nil {
 			slog.Error("failed to upsert computer on register",
 				"request_id", reqID,
 				"daemon_id", req.DaemonID,
@@ -138,7 +138,7 @@ func (h *DaemonHandler) Heartbeat(w http.ResponseWriter, r *http.Request) {
 				Hostname: req.SystemInfo.Hostname,
 				IP:       req.SystemInfo.IP,
 			}
-			if err := h.computerSvc.UpdateHeartbeat(r.Context(), req.DaemonID, daemonURL, req.AgentIDs, sysinfo); err != nil {
+			if err := h.computerSvc.UpdateHeartbeat(r.Context(), req.DaemonID, daemonURL, req.AgentIDs, sysinfo, req.RuntimeInventory); err != nil {
 				slog.Error("failed to update computer heartbeat in DB — returning 404 to trigger daemon re-registration",
 					"request_id", reqID,
 					"daemon_id", req.DaemonID,

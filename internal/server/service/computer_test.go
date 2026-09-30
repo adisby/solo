@@ -1,11 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestComputerEnrollmentIsOneTimeAndRevocable(t *testing.T) {
@@ -226,7 +229,7 @@ func TestMarkConnectedKeepsLegacyDaemonIdentityReusable(t *testing.T) {
 	if daemonID != "daemon-test-reusable" || status != "offline" {
 		t.Fatalf("legacy Computer daemon/status = %q/%q", daemonID, status)
 	}
-	if err := svc.UpsertComputerByDaemonID(ctx, "daemon-test-reusable", "http://127.0.0.1:8081", "", ComputerSystemInfo{}); err != nil {
+	if err := svc.UpsertComputerByDaemonID(ctx, "daemon-test-reusable", "http://127.0.0.1:8081", "", ComputerSystemInfo{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -457,7 +460,7 @@ func TestUpdateHeartbeatFiltersInactiveAgentIDs(t *testing.T) {
 		t.Fatalf("deactivate agent: %v", err)
 	}
 
-	err = NewComputerService(pool).UpdateHeartbeat(ctx, daemonID, "http://127.0.0.1:1", []string{activeAgentID, inactiveAgentID}, ComputerSystemInfo{})
+	err = NewComputerService(pool).UpdateHeartbeat(ctx, daemonID, "http://127.0.0.1:1", []string{activeAgentID, inactiveAgentID}, ComputerSystemInfo{}, nil)
 	if err != nil {
 		t.Fatalf("UpdateHeartbeat: %v", err)
 	}
@@ -469,4 +472,74 @@ func TestUpdateHeartbeatFiltersInactiveAgentIDs(t *testing.T) {
 	if len(agentIDs) != 1 || agentIDs[0] != activeAgentID {
 		t.Fatalf("agent_ids = %#v, want only %q", agentIDs, activeAgentID)
 	}
+}
+
+// The unpaired local-compatibility transport used to drop the daemon's runtime
+// inventory, so a local development stack could not offer any runtime in the
+// Agent form or the onboarding wizard even though the daemons were detected.
+func TestDaemonRegistrationRecordsRuntimeInventory(t *testing.T) {
+	pool := taskSubmitTestPool(t)
+	ctx := context.Background()
+	svc := NewComputerService(pool)
+	daemonID := "daemon-test-inventory-" + uuid.NewString()
+	legacyDaemonID := "daemon-test-inventory-legacy-" + uuid.NewString()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM computers WHERE daemon_id IN ($1,$2)`, daemonID, legacyDaemonID)
+	})
+
+	detected := json.RawMessage(`[{"type":"dsh","display_name":"DeepSeek Harness","binary":"dsh","available":true,"version":"0.2.0-rc.2"}]`)
+	sysinfo := ComputerSystemInfo{OS: "darwin", Hostname: "inventory-mac"}
+
+	if err := svc.UpsertComputerByDaemonID(ctx, daemonID, "http://127.0.0.1:8081", "", sysinfo, detected); err != nil {
+		t.Fatalf("UpsertComputerByDaemonID: %v", err)
+	}
+	if got := storedInventory(t, pool, daemonID); !bytes.Contains(got, []byte(`"dsh"`)) {
+		t.Fatalf("inventory after registration = %s, want it to record dsh", got)
+	}
+
+	// An older daemon reports no inventory: the stored value must survive, both
+	// on heartbeat and on re-registration.
+	if err := svc.UpdateHeartbeat(ctx, daemonID, "http://127.0.0.1:8081", nil, sysinfo, nil); err != nil {
+		t.Fatalf("UpdateHeartbeat: %v", err)
+	}
+	if got := storedInventory(t, pool, daemonID); !bytes.Contains(got, []byte(`"dsh"`)) {
+		t.Fatalf("inventory after inventory-less heartbeat = %s, want it preserved", got)
+	}
+
+	// A fresh detection replaces the stored value, including when nothing is
+	// available any more.
+	refreshed := json.RawMessage(`[{"type":"dsh","display_name":"DeepSeek Harness","binary":"dsh","available":false}]`)
+	if err := svc.UpdateHeartbeat(ctx, daemonID, "http://127.0.0.1:8081", nil, sysinfo, refreshed); err != nil {
+		t.Fatalf("UpdateHeartbeat: %v", err)
+	}
+	if got := storedInventory(t, pool, daemonID); bytes.Contains(got, []byte(`"available":true`)) {
+		t.Fatalf("inventory after refreshed heartbeat = %s, want the refreshed value", got)
+	}
+
+	if err := svc.UpsertComputerByDaemonID(ctx, daemonID, "http://127.0.0.1:8081", "", sysinfo, nil); err != nil {
+		t.Fatalf("UpsertComputerByDaemonID: %v", err)
+	}
+	if got := storedInventory(t, pool, daemonID); bytes.Contains(got, []byte(`"available":true`)) {
+		t.Fatalf("inventory after inventory-less re-registration = %s, want it preserved", got)
+	}
+
+	// runtime_inventory is NOT NULL DEFAULT '[]': a first registration without an
+	// inventory must land as an empty array rather than violating the constraint.
+	if err := svc.UpsertComputerByDaemonID(ctx, legacyDaemonID, "http://127.0.0.1:8082", "", sysinfo, nil); err != nil {
+		t.Fatalf("UpsertComputerByDaemonID without inventory: %v", err)
+	}
+	if got := bytes.TrimSpace(storedInventory(t, pool, legacyDaemonID)); string(got) != "[]" {
+		t.Fatalf("inventory for an inventory-less daemon = %s, want []", got)
+	}
+}
+
+func storedInventory(t *testing.T, pool *pgxpool.Pool, daemonID string) []byte {
+	t.Helper()
+	var raw []byte
+	if err := pool.QueryRow(context.Background(),
+		`SELECT runtime_inventory FROM computers WHERE daemon_id=$1`, daemonID,
+	).Scan(&raw); err != nil {
+		t.Fatalf("read runtime_inventory: %v", err)
+	}
+	return raw
 }

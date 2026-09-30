@@ -1110,7 +1110,13 @@ type DaemonRegisterRequest struct {
 	CurrentLoad   int32            `json:"current_load"`
 	AgentTypes    []string         `json:"agent_types"`
 	SystemInfo    DaemonSystemInfo `json:"system_info"`
-	Tasks         []string         `json:"tasks,omitempty"`
+	// RuntimeInventory is the daemon's CLI detection result. The paired control
+	// channel already reports it on connect and heartbeat; carrying it here lets
+	// the unpaired local-compatibility transport record it too, so a local
+	// development stack can offer runtimes without enrolling the Computer.
+	// Older daemons omit it, and the server then keeps the stored value.
+	RuntimeInventory json.RawMessage `json:"runtime_inventory,omitempty"`
+	Tasks            []string        `json:"tasks,omitempty"`
 }
 
 type DaemonRegisterResponse struct {
@@ -1126,6 +1132,9 @@ type DaemonHeartbeatRequest struct {
 	ActiveTasks []string         `json:"active_tasks"`
 	AgentIDs    []string         `json:"agent_ids,omitempty"`
 	SystemInfo  DaemonSystemInfo `json:"system_info"`
+	// See DaemonRegisterRequest.RuntimeInventory. Refreshing it on heartbeat
+	// keeps the inventory current when a CLI is installed without a restart.
+	RuntimeInventory json.RawMessage `json:"runtime_inventory,omitempty"`
 }
 
 type DaemonHeartbeatResponse struct {

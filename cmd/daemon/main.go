@@ -318,16 +318,17 @@ func registerWithServer(ctx context.Context) error {
 	}
 
 	req := daemonRegisterPayload{
-		DaemonID:      daemonID,
-		Host:          host,
-		Port:          port,
-		Version:       version.Version,
-		Capabilities:  daemonCapabilities(),
-		MaxConcurrent: 10,
-		CurrentLoad:   0,
-		AgentTypes:    registeredAgentTypes(),
-		SystemInfo:    collectSystemInfo(),
-		Tasks:         taskMgr.ListTaskIDs(),
+		DaemonID:         daemonID,
+		Host:             host,
+		Port:             port,
+		Version:          version.Version,
+		Capabilities:     daemonCapabilities(),
+		MaxConcurrent:    10,
+		CurrentLoad:      0,
+		AgentTypes:       registeredAgentTypes(),
+		SystemInfo:       collectSystemInfo(),
+		RuntimeInventory: agent.GlobalRegistry().Detect(),
+		Tasks:            taskMgr.ListTaskIDs(),
 	}
 
 	payload, err := json.Marshal(req)
@@ -415,13 +416,14 @@ func sendHeartbeat() {
 	}
 
 	req := daemonHeartbeatPayload{
-		DaemonID:    daemonID,
-		Load:        0,
-		MaxLoad:     10,
-		UptimeSec:   int64(time.Since(startTime).Seconds()),
-		ActiveTasks: taskMgr.ListActiveTasks(),
-		AgentIDs:    daemonH.cachedSessionAgentIDs(),
-		SystemInfo:  collectSystemInfo(),
+		DaemonID:         daemonID,
+		Load:             0,
+		MaxLoad:          10,
+		UptimeSec:        int64(time.Since(startTime).Seconds()),
+		ActiveTasks:      taskMgr.ListActiveTasks(),
+		AgentIDs:         daemonH.cachedSessionAgentIDs(),
+		SystemInfo:       collectSystemInfo(),
+		RuntimeInventory: agent.GlobalRegistry().Detect(),
 		// Skills served on-demand via /internal/daemon/skills
 	}
 
@@ -493,7 +495,11 @@ type daemonRegisterPayload struct {
 	CurrentLoad   int32      `json:"current_load"`
 	AgentTypes    []string   `json:"agent_types"`
 	SystemInfo    SystemInfo `json:"system_info"`
-	Tasks         []string   `json:"tasks,omitempty"`
+	// RuntimeInventory feeds computers.runtime_inventory on the unpaired
+	// local-compatibility transport, which otherwise has no way to report which
+	// provider CLIs this machine can actually run.
+	RuntimeInventory []agent.BackendStatus `json:"runtime_inventory,omitempty"`
+	Tasks            []string              `json:"tasks,omitempty"`
 }
 
 type daemonRegisterResponse struct {
@@ -509,6 +515,8 @@ type daemonHeartbeatPayload struct {
 	ActiveTasks []string   `json:"active_tasks"`
 	AgentIDs    []string   `json:"agent_ids"`
 	SystemInfo  SystemInfo `json:"system_info"`
+	// Refreshed every heartbeat so installing a CLI shows up without a restart.
+	RuntimeInventory []agent.BackendStatus `json:"runtime_inventory,omitempty"`
 	// Skills are served on-demand via /internal/daemon/skills, not in heartbeat.
 }
 
