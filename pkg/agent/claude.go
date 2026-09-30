@@ -1177,6 +1177,13 @@ func buildEnv(extra map[string]string) []string {
 
 // buildEnvAt adds the workspace directory to PATH before merging extra vars.
 // The workspace dir contains the solo binary, so agents can run "solo" directly.
+//
+// Two Windows traps live here. The separator must come from the platform:
+// hardcoding ":" yields a single malformed entry, because the drive letter's own
+// colon terminates the first component. And the inherited variable is spelled
+// `Path`, not `PATH`: a case-sensitive prefix test misses it and appends a
+// second PATH, leaving the child with both `Path=...` and `PATH=<ws>`. The lookup
+// is therefore case-insensitive, which is also how Windows itself matches names.
 func buildEnvAt(workspaceDir string, extra map[string]string) []string {
 	env := mergeEnv(os.Environ(), extra)
 	pathEntry := "./"
@@ -1184,13 +1191,20 @@ func buildEnvAt(workspaceDir string, extra map[string]string) []string {
 		pathEntry = workspaceDir
 	}
 	for i, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			env[i] = "PATH=" + pathEntry + ":" + e[5:]
+		if pathEnvKey(e) {
+			env[i] = e[:len("PATH=")] + pathEntry + string(os.PathListSeparator) + e[len("PATH="):]
 			return env
 		}
 	}
 	env = append(env, "PATH="+pathEntry)
 	return env
+}
+
+// pathEnvKey reports whether an "KEY=VALUE" entry names the PATH variable,
+// matching case-insensitively so a Windows-style `Path=` is recognised.
+func pathEnvKey(entry string) bool {
+	key, _, found := strings.Cut(entry, "=")
+	return found && strings.EqualFold(key, "PATH")
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {
