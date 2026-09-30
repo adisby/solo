@@ -20,9 +20,10 @@ Daemon resolves the executable from `DSH_BIN` (or `dsh` on `PATH`).
 | `session.status` → `running` | `status` output chunk (the resting `idle` is not turn output) |
 | `shutdown` | graceful close on session teardown |
 
-Observed against DSH 0.1.6-alpha.2: the SDK runtime reports a **completed
-`assistant/message`**, not per-delta chunks. Handling only `assistant/chunk`
-produces a turn that completes with no output at all.
+Observed against DSH 0.1.6-alpha.2 and re-confirmed on 0.2.0-rc.2: the SDK
+runtime reports a **completed `assistant/message`**, not per-delta chunks.
+Handling only `assistant/chunk` produces a turn that completes with no output at
+all.
 
 Reusing one `sessionId` across turns keeps the conversation, so the persistent
 path needs no extra protocol. The adapter always mints a fresh id for a new
@@ -35,16 +36,18 @@ ends the process instead of interrupting a turn.
 1. **DSH with an `sdk` profile.** `sdk` is not a shipped profile name; create it
    from the SDK bundle. `@deepseek-ai/dsh-sdk-app` builds its own Cordis tree with
    an `insert:` list and deliberately does **not** layer over
-   `@deepseek-ai/dsh-base`, so two things dsh-base would otherwise provide are
-   missing and must be restored by an overlay:
+   `@deepseek-ai/dsh-base`, so what dsh-base would otherwise provide is missing
+   and must be restored by an overlay:
 
-   - **the credentials service.** Without `@deepseek-ai/dsh-credentials-local`,
-     `llm-deepseek`'s `apiKeyEnv: DEEPSEEK_API_KEY` has nothing to read from and
-     every turn fails with `no API key for provider route "deepseek-official"`,
-     even though `dsh headless` works fine with the same home.
-   - **zstd session-log compression.** The bundle pins session persistence to
-     `compression: none`, which conflicts with a home whose logs another profile
-     wrote as `.jsonl.zstd`.
+   - **the credentials service.** Required on every version tested. Without
+     `@deepseek-ai/dsh-credentials-local`, `llm-deepseek`'s
+     `apiKeyEnv: DEEPSEEK_API_KEY` has nothing to read from and every turn fails
+     with `no API key for provider route "deepseek-official"`, even though
+     `dsh headless` works fine with the same home.
+   - **zstd session-log compression.** Needed on 0.1.6-alpha.2 only, where the
+     bundle pins session persistence to `compression: none`, which conflicts with
+     a home whose logs another profile wrote as `.jsonl.zstd`. On 0.2.0-rc.2 the
+     config carries no `compression` key at all — see the version note below.
 
    `$DSH_HOME/profiles/sdk/package.json`
 
@@ -71,15 +74,26 @@ ends the process instead of interrupting a turn.
    - insert:
        - id: credentials
          name: '@deepseek-ai/dsh-credentials-local'
-
-   - id: sessions
-     config:
-       root: !!js dshHomePath('sessions')
-       compression: zstd
    ```
 
-   Note that an `id:` entry **replaces** that entry's whole config block, which is
-   why `root` is repeated for the sessions override.
+   Note that an `id:` entry **replaces** that entry's whole config block, so
+   `root` must be repeated for any entry that is overridden.
+
+   **Version note.** The zstd `sessions` override is only needed on
+   0.1.6-alpha.2. Verified against **0.2.0-rc.2**, where the service is
+   `session-persistence-jsonl` and its config carries no `compression` key at
+   all, so nothing pins it to `none` and the conflict cannot arise. Carrying the
+   older entry there fails outright:
+
+   ```
+   dsh: [.../solo-sdk-overlay.yml] patch: entry "sessions" not found
+   ```
+
+   Check what a given install actually resolves before trusting either shape:
+
+   ```bash
+   dsh --profile sdk --patch "$DSH_HOME/solo-sdk-overlay.yml" --dump-config
+   ```
 
    Verify without starting a session:
 
@@ -129,6 +143,8 @@ SOLO_E2E_DSH=1 DSH_BIN=/path/to/dsh go test ./pkg/agent/ \
 | `unknown option '--permission-mode'` | The permission mode was passed as a flag. It belongs in `DSH_PERMISSION_MODE`. |
 | `no API key for provider route` while `dsh headless` works | The `sdk` profile is missing the `credentials` service (requirement 1). |
 | A turn completes with no output and no usage | The adapter only saw `turn/end`; the runtime reported `assistant/message`, which must be handled (see the mapping table). |
-| `uses .jsonl.zstd, but this backend is configured for compression "none"` | The session compression overlay is missing (requirement 1). |
+| `uses .jsonl.zstd, but this backend is configured for compression "none"` | The session compression overlay is missing. Applies to 0.1.6-alpha.2 only; on 0.2.0-rc.2 the config pins no compression at all. |
+| `patch: entry "sessions" not found` | The zstd overlay was copied to a DSH version where that service does not exist. On 0.2.0-rc.2 it is `session-persistence-jsonl`, and no compression override is needed — drop the entry. |
+| `multiple online daemons; computer selection is required` (HTTP 503 from `/api/v1/agent-backends/detect`) | Not a DSH fault. Several Computers are registered, so detection needs an explicit `?computer_id=` (and that Computer must belong to the calling user). |
 | `$.root missing required value` | A patch override dropped `root`; an `id:` entry replaces the whole config block. |
 | `dsh process exited unexpectedly` during initialize | The launcher failed to boot, usually a missing or invalid profile. Run `dsh --profile sdk --dump-config` to see why. |
