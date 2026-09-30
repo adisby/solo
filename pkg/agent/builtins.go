@@ -139,14 +139,14 @@ func init() {
 	}, piFactory)
 
 	// ── dsh — DeepSeek Harness via its SDK JSON-RPC runtime ─────────
-	r.Register(AdapterMeta{
+	r.RegisterWithBinaryResolver(AdapterMeta{
 		Type:           "dsh",
 		DisplayName:    "DeepSeek Harness",
 		RequiresBinary: "dsh",
 		DetectCommand:  "--version",
 		Protocols:      []string{"json-rpc"},
 		Capabilities:   dshCapabilities(),
-	}, dshFactory)
+	}, dshFactory, resolveDshForDetection)
 }
 
 // dshCapabilities describes what this adapter integrates, not what DSH could do

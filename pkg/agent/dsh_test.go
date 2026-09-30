@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -256,6 +257,63 @@ func TestDshBackendFreshStartCreatesANewSession(t *testing.T) {
 	secondID, _ := start("second process")
 	if firstID == secondID {
 		t.Fatalf("two processes reused session id %q; DSH mints per-client ids", firstID)
+	}
+}
+
+// TestDshDetectionHonoursDSHBin covers local runtime detection: an operator who
+// points the adapter at an explicit launcher must see DSH as available even
+// though `dsh` is not on PATH, which is the common case for a source checkout.
+func TestDshDetectionHonoursDSHBin(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+	t.Setenv("DSH_BIN", self)
+
+	var found *BackendStatus
+	for _, status := range GlobalRegistry().Detect() {
+		if status.Type == "dsh" {
+			candidate := status
+			found = &candidate
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("the dsh adapter is not registered")
+	}
+	if !found.Available {
+		t.Fatalf("dsh reported unavailable with DSH_BIN set: %s", found.Error)
+	}
+	if found.Binary != self {
+		t.Fatalf("dsh binary = %q, want the DSH_BIN path %q", found.Binary, self)
+	}
+}
+
+// TestDshDetectionRunsAScriptLauncherThroughNode covers the checkout case: a .js
+// launcher must be probed through node, so the reported binary is the interpreter
+// rather than an unrunnable script.
+func TestDshDetectionRunsAScriptLauncherThroughNode(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node is not on PATH: %v", err)
+	}
+	t.Setenv("DSH_BIN", filepath.Join(t.TempDir(), "bin.js"))
+
+	var found *BackendStatus
+	for _, status := range GlobalRegistry().Detect() {
+		if status.Type == "dsh" {
+			candidate := status
+			found = &candidate
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("the dsh adapter is not registered")
+	}
+	if !found.Available {
+		t.Fatalf("a .js launcher was reported unavailable: %s", found.Error)
+	}
+	if !strings.Contains(found.Binary, "node") {
+		t.Fatalf("dsh binary = %q, want the node interpreter", found.Binary)
 	}
 }
 

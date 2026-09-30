@@ -120,6 +120,23 @@ func (b *DshBackend) resolveLaunch() (string, []string, error) {
 	return dshLaunch(b.executablePath)
 }
 
+// resolveDshForDetection resolves the DSH command for local runtime detection.
+//
+// It mirrors the launch path so an operator who points the adapter at an explicit
+// launcher (DSH_BIN, for example a checkout's bin.js run through node) still sees
+// DSH as available, instead of it looking unavailable because `dsh` is not on
+// PATH. Only the --version probe differs from a real launch: the profile flags
+// are omitted, since the launcher reports its version without booting a profile.
+func resolveDshForDetection() (string, []string, error) {
+	execPath, args, err := dshLaunch(execPathOrDefault("", "DSH_BIN"))
+	if err != nil {
+		return "", nil, err
+	}
+	// args is nil for an executable and [<launcher.js>] for a script entry point,
+	// which is exactly what has to precede --version.
+	return execPath, args, nil
+}
+
 // dshDefaultPermissionMode keeps an unattended Daemon run from blocking on a
 // tool-approval prompt.
 const dshDefaultPermissionMode = "danger-full-access"

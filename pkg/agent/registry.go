@@ -95,6 +95,10 @@ type BackendRegistry struct {
 type registryEntry struct {
 	Factory BackendFactory
 	Meta    AdapterMeta
+	// resolveBinary optionally overrides how local detection finds the CLI. It
+	// lives here rather than on AdapterMeta because that struct is serialized to
+	// the API, and a func field cannot be marshalled.
+	resolveBinary func() (execPath string, leadingArgs []string, err error)
 }
 
 // globalRegistry is the package-level singleton.
@@ -108,10 +112,31 @@ func GlobalRegistry() *BackendRegistry { return globalRegistry }
 // Register adds a backend adapter to the registry. It overwrites any
 // existing entry with the same meta.Type. Safe for concurrent use.
 func (r *BackendRegistry) Register(meta AdapterMeta, factory BackendFactory) {
+	r.register(meta, factory, nil)
+}
+
+// RegisterWithBinaryResolver registers an adapter whose local detection resolves
+// its CLI through resolveBinary instead of a PATH lookup of RequiresBinary. Use
+// it for adapters that are commonly pointed at an explicit launcher, so they are
+// not reported as unavailable merely because the binary is not installed
+// globally.
+func (r *BackendRegistry) RegisterWithBinaryResolver(
+	meta AdapterMeta,
+	factory BackendFactory,
+	resolveBinary func() (execPath string, leadingArgs []string, err error),
+) {
+	r.register(meta, factory, resolveBinary)
+}
+
+func (r *BackendRegistry) register(
+	meta AdapterMeta,
+	factory BackendFactory,
+	resolveBinary func() (execPath string, leadingArgs []string, err error),
+) {
 	meta.Capabilities = meta.Capabilities.normalized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.backends[meta.Type] = registryEntry{Factory: factory, Meta: meta}
+	r.backends[meta.Type] = registryEntry{Factory: factory, Meta: meta, resolveBinary: resolveBinary}
 }
 
 // Create constructs a Backend of the given type using the supplied config.
@@ -137,8 +162,9 @@ type BackendStatus struct {
 }
 
 // Detect checks every registered backend for local availability by looking up
-// its binary with exec.LookPath. If found and a DetectCommand is configured, it
-// also captures the version output. Each check is capped at 5 seconds.
+// its binary with exec.LookPath, or by asking the adapter to resolve it first.
+// If found and a DetectCommand is configured, it also captures the version
+// output. Each check is capped at 5 seconds.
 func (r *BackendRegistry) Detect() []BackendStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -150,23 +176,41 @@ func (r *BackendRegistry) Detect() []BackendStatus {
 			DisplayName: entry.Meta.DisplayName,
 			Binary:      entry.Meta.RequiresBinary,
 		}
-		path, err := exec.LookPath(entry.Meta.RequiresBinary)
-		if err != nil {
-			status.Available = false
-			status.Error = err.Error()
+
+		execPath := ""
+		leadingArgs := []string(nil)
+		if entry.resolveBinary != nil {
+			resolved, args, err := entry.resolveBinary()
+			if err != nil {
+				status.Available = false
+				status.Error = err.Error()
+				results = append(results, status)
+				continue
+			}
+			execPath, leadingArgs = resolved, args
+			status.Binary = resolved
 		} else {
-			status.Available = true
-			if entry.Meta.DetectCommand != "" {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				out, err := exec.CommandContext(ctx, path, entry.Meta.DetectCommand).Output()
-				cancel()
-				if err == nil {
-					v := strings.TrimSpace(string(out))
-					if idx := strings.IndexByte(v, '\n'); idx >= 0 {
-						v = v[:idx]
-					}
-					status.Version = strings.TrimSpace(v)
+			path, err := exec.LookPath(entry.Meta.RequiresBinary)
+			if err != nil {
+				status.Available = false
+				status.Error = err.Error()
+				results = append(results, status)
+				continue
+			}
+			execPath = path
+		}
+
+		status.Available = true
+		if entry.Meta.DetectCommand != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			out, err := exec.CommandContext(ctx, execPath, append(append([]string{}, leadingArgs...), entry.Meta.DetectCommand)...).Output()
+			cancel()
+			if err == nil {
+				v := strings.TrimSpace(string(out))
+				if idx := strings.IndexByte(v, '\n'); idx >= 0 {
+					v = v[:idx]
 				}
+				status.Version = strings.TrimSpace(v)
 			}
 		}
 		results = append(results, status)
