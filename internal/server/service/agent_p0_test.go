@@ -250,7 +250,10 @@ func TestAgentRunWatchdogTimesOutStaleActiveRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
-	old := time.Now().Add(-agentRunExecutionTimeout - agentRunWatchdogInterval - time.Second)
+	// Age the Run past the finality floor. The inactivity window is configurable,
+	// so age well beyond any sane override rather than pinning the test to a
+	// specific default.
+	old := time.Now().Add(-(agentRunInactivityTimeoutDefault + agentRunExecutionCeilingDefault + time.Hour))
 	_, err = pool.Exec(ctx, `UPDATE agent_runs SET started_at = $2, backend_started_at = $2, updated_at = $2 WHERE id = $1`, run.ID, old)
 	if err != nil {
 		t.Fatalf("age run: %v", err)
@@ -275,6 +278,58 @@ func TestAgentRunWatchdogTimesOutStaleActiveRun(t *testing.T) {
 	}
 	if !rec.hasBroadcastEvent("agent.run.finished", agentActivityTimeout) {
 		t.Fatalf("timeout finish not broadcast: %q", rec.broadcastMessages)
+	}
+}
+
+// TestAgentRunWatchdogSparesLongRunningActiveRun is the regression for the
+// hard six-minute cut: a Run that is still recording progress must survive past
+// that point, however long its backend has been up.
+func TestAgentRunWatchdogSparesLongRunningActiveRun(t *testing.T) {
+	pool := agentRunTestPool(t)
+	ctx := context.Background()
+	ownerID := agentRunUser(t, pool)
+	agentID := agentRunAgent(t, pool, ownerID)
+	channelID := agentRunChannel(t, pool, ownerID)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM agent_runs WHERE agent_id = $1`, agentID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM channels WHERE id = $1`, channelID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM agents WHERE id = $1`, agentID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID)
+	})
+
+	runSvc := NewAgentRunService(pool)
+	run, err := runSvc.StartRun(ctx, StartRunInput{
+		AgentID:      agentID,
+		TriggerType:  AgentRunTriggerMessage,
+		ChannelID:    channelID,
+		Status:       AgentRunStatusRunning,
+		ActivityText: "working",
+	})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	// The backend has been up far longer than the old six-minute limit, but the
+	// Run is still emitting progress, so updated_at stays recent.
+	longAgo := time.Now().Add(-30 * time.Minute)
+	if _, err := pool.Exec(ctx,
+		`UPDATE agent_runs SET started_at = $2, backend_started_at = $2, updated_at = now() WHERE id = $1`,
+		run.ID, longAgo); err != nil {
+		t.Fatalf("age backend start: %v", err)
+	}
+
+	rec := newRecordingBroadcaster()
+	svc := NewAgentService(pool, NewDaemonManager(pool, rec), rec, nil)
+	if err := svc.CheckAgentRunWatchdogs(ctx, time.Now()); err != nil {
+		t.Fatalf("CheckAgentRunWatchdogs: %v", err)
+	}
+
+	var status string
+	var finishedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT status, finished_at FROM agent_runs WHERE id = $1`, run.ID).Scan(&status, &finishedAt); err != nil {
+		t.Fatalf("query run: %v", err)
+	}
+	if status == string(AgentRunStatusTimeout) || finishedAt != nil {
+		t.Fatalf("active Run was reaped: status=%q finished_at=%v", status, finishedAt)
 	}
 }
 

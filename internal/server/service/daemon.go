@@ -100,7 +100,11 @@ func NewDaemonManager(pool *pgxpool.Pool, hub realtime.Broadcaster) *DaemonManag
 		heartbeatInterval:  30 * time.Second,
 		maxMissedHB:        3,
 		queueTimeout:       agentRunQueueTimeout,
-		executionTimeout:   agentRunExecutionTimeout,
+		// This pending-task reaper only sees the phase boundary, not per-Run
+		// activity, so it must not be the thing that decides a working Agent is
+		// stuck. It gets the absolute ceiling; the activity-based watchdog in
+		// listStaleActiveRuns handles genuinely stalled Runs.
+		executionTimeout:   agentRunExecutionCeiling(),
 		stopCh:             make(chan struct{}),
 		controlConnections: make(map[string]*DaemonControlConnection),
 		controlGrace:       make(map[string]controlLeaseGrace),

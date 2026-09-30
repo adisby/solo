@@ -22,8 +22,35 @@ func TestAgentRunPhaseTimeouts(t *testing.T) {
 	if agentRunQueueTimeout != 20*time.Minute {
 		t.Fatalf("agentRunQueueTimeout = %s, want 20m", agentRunQueueTimeout)
 	}
-	if agentRunExecutionTimeout != 6*time.Minute {
-		t.Fatalf("agentRunExecutionTimeout = %s, want 6m", agentRunExecutionTimeout)
+	// The execution bound must not be stricter than the legacy fixed limit: the
+	// fix is that staleness follows activity, not that runs get less time.
+	if agentRunInactivityTimeout() < 6*time.Minute {
+		t.Fatalf("agent run inactivity timeout = %s, want at least the legacy 6m", agentRunInactivityTimeout())
+	}
+	if agentRunExecutionCeiling() <= agentRunInactivityTimeout() {
+		t.Fatalf("execution ceiling %s must exceed the inactivity window %s",
+			agentRunExecutionCeiling(), agentRunInactivityTimeout())
+	}
+}
+
+// TestAgentRunWatchdogDurationsAreConfigurable covers the deployment knob: the
+// bounds can be widened for a slow Computer without rebuilding the Server, and an
+// unusable value falls back rather than disabling the watchdog.
+func TestAgentRunWatchdogDurationsAreConfigurable(t *testing.T) {
+	t.Setenv(agentRunInactivityTimeoutEnv, "45m")
+	t.Setenv(agentRunExecutionCeilingEnv, "6h")
+	if got := agentRunInactivityTimeout(); got != 45*time.Minute {
+		t.Fatalf("inactivity timeout = %s, want 45m", got)
+	}
+	if got := agentRunExecutionCeiling(); got != 6*time.Hour {
+		t.Fatalf("execution ceiling = %s, want 6h", got)
+	}
+
+	for _, bad := range []string{"not-a-duration", "0", "-5m"} {
+		t.Setenv(agentRunInactivityTimeoutEnv, bad)
+		if got := agentRunInactivityTimeout(); got != agentRunInactivityTimeoutDefault {
+			t.Fatalf("inactivity timeout with %q = %s, want the default %s", bad, got, agentRunInactivityTimeoutDefault)
+		}
 	}
 }
 

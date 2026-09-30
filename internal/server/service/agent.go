@@ -35,7 +35,24 @@ const (
 	agentNoProgressAfter     = 5 * time.Minute
 	agentRunWatchdogInterval = 30 * time.Second
 	agentRunQueueTimeout     = 20 * time.Minute
-	agentRunExecutionTimeout = 6 * time.Minute
+
+	// agentRunInactivityTimeoutDefault is how long an executing Run may make no
+	// recorded progress before the watchdog gives up on it. The watchdog
+	// previously measured only elapsed time since the backend started, which
+	// killed Runs that were working correctly the entire time — the Agent's own
+	// reply was often the last thing it managed to send. Staleness is now decided
+	// by the Run's last activity, so a busy Agent keeps its Run alive.
+	agentRunInactivityTimeoutDefault = 20 * time.Minute
+	// agentRunExecutionCeilingDefault is the absolute bound on a single Run.
+	// Without it an Agent that keeps emitting progress forever would never be
+	// reaped.
+	agentRunExecutionCeilingDefault = 2 * time.Hour
+
+	// agentRunInactivityTimeoutEnv and agentRunExecutionCeilingEnv override the
+	// two bounds above without a rebuild, so a deployment can widen them for slow
+	// Computers (long Windows shell startup, large checkouts) or tighten them.
+	agentRunInactivityTimeoutEnv = "SOLO_AGENT_RUN_INACTIVITY_TIMEOUT"
+	agentRunExecutionCeilingEnv  = "SOLO_AGENT_RUN_EXECUTION_CEILING"
 
 	agentRunEventNoVisibleReplyWatchdog = "watchdog_no_visible_reply"
 	agentRunEventNoProgressWatchdog     = "watchdog_no_progress"
@@ -1797,7 +1814,7 @@ func (s *AgentService) CheckAgentRunWatchdogs(ctx context.Context, now time.Time
 		}
 	}
 
-	staleRuns, err := s.listStaleActiveRuns(ctx, now.Add(-agentRunExecutionTimeout-agentRunWatchdogInterval))
+	staleRuns, err := s.listStaleActiveRuns(ctx, time.Now(), agentRunInactivityTimeout())
 	if err != nil {
 		return err
 	}
@@ -1845,14 +1862,48 @@ func (s *AgentService) listStaleQueuedRuns(ctx context.Context, before time.Time
 	))
 }
 
-func (s *AgentService) listStaleActiveRuns(ctx context.Context, before time.Time) ([]AgentRun, error) {
+// agentRunInactivityTimeout returns how long an executing Run may go without
+// recorded progress before the watchdog reaps it.
+func agentRunInactivityTimeout() time.Duration {
+	return agentRunDurationEnv(agentRunInactivityTimeoutEnv, agentRunInactivityTimeoutDefault)
+}
+
+// agentRunExecutionCeiling returns the absolute bound on a single Run.
+func agentRunExecutionCeiling() time.Duration {
+	return agentRunDurationEnv(agentRunExecutionCeilingEnv, agentRunExecutionCeilingDefault)
+}
+
+// agentRunDurationEnv reads a positive duration override, ignoring unusable
+// values so a typo cannot disable the watchdog entirely.
+func agentRunDurationEnv(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		slog.Warn("ignoring invalid agent run watchdog duration", "env", name, "value", raw, "fallback", fallback)
+		return fallback
+	}
+	return parsed
+}
+
+// listStaleActiveRuns returns executing Runs that have stopped making progress.
+//
+// Staleness is measured from updated_at, the column every status, event and
+// transcript write refreshes, so an Agent that is still working keeps its Run
+// out of this list. backend_started_at bounds the Run instead: a Run that keeps
+// producing activity forever is still reaped once it passes the ceiling.
+func (s *AgentService) listStaleActiveRuns(ctx context.Context, now time.Time, inactivity time.Duration) ([]AgentRun, error) {
 	return scanAgentRuns(s.pool.Query(ctx, baseAgentRunSelect()+`
 		 WHERE r.status = ANY($1)
-		   AND r.backend_started_at <= $2
-		 ORDER BY r.backend_started_at ASC
+		   AND r.updated_at <= $2
+		   AND r.backend_started_at <= $3
+		 ORDER BY r.updated_at ASC
 		 LIMIT 100`,
 		executingAgentRunStatuses(),
-		before,
+		now.Add(-inactivity),
+		now.Add(-agentRunExecutionCeiling()),
 	))
 }
 
