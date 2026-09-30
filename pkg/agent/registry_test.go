@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -331,5 +333,62 @@ func TestRegistry_CreatePropagatesFactoryError(t *testing.T) {
 	}
 	if b != nil {
 		t.Error("expected nil backend on factory error")
+	}
+}
+
+// ── Binary override detection ───────────────────────────────────────────────
+
+// A backend reachable only through its declared overlay variable must be
+// reported available. The factories honour <NAME>_BIN when launching, so
+// detection that looked only at PATH reported a working runtime as missing —
+// which is how a configured DeepSeek Harness ended up absent from the UI.
+//
+// The fixture is this test binary, which resolves as an executable on every
+// platform; a generated shell script would only do so on POSIX, leaving the
+// platform that motivated the rule untested. Capturing the --version output is
+// covered by the DSH detection tests.
+func TestDetectHonoursBinaryOverrideEnv(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test binary: %v", err)
+	}
+
+	reg := &BackendRegistry{backends: make(map[string]registryEntry)}
+	reg.Register(AdapterMeta{
+		Type:              "probe",
+		DisplayName:       "Probe Runtime",
+		RequiresBinary:    "solo-absent-runtime-binary",
+		DetectCommand:     "--version",
+		BinaryOverrideEnv: []string{"SOLO_TEST_PROBE_BIN"},
+	}, newTestBackendFactory("probe", nil))
+
+	status := func() BackendStatus {
+		t.Helper()
+		for _, s := range reg.Detect() {
+			if s.Type == "probe" {
+				return s
+			}
+		}
+		t.Fatal("probe backend missing from Detect result")
+		return BackendStatus{}
+	}
+
+	if got := status(); got.Available {
+		t.Fatalf("available without the override = true (error %q), want false", got.Error)
+	}
+
+	t.Setenv("SOLO_TEST_PROBE_BIN", self)
+	got := status()
+	if !got.Available {
+		t.Fatalf("available with the override set = false (error %q), want true", got.Error)
+	}
+	if got.Binary != self {
+		t.Fatalf("binary = %q, want the override's path %q", got.Binary, self)
+	}
+
+	// A broken override must not silently fall back to PATH.
+	t.Setenv("SOLO_TEST_PROBE_BIN", filepath.Join(t.TempDir(), "does-not-exist"))
+	if got := status(); got.Available {
+		t.Fatalf("available with a broken override = true, want false")
 	}
 }

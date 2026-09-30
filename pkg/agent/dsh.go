@@ -82,7 +82,9 @@ func (b *DshBackend) Name() string { return "dsh" }
 // dshLaunch resolves the executable and full argument list for one DSH process.
 //
 // DSH is normally started as `dsh --profile sdk`, but a source checkout only
-// exposes the launcher script, so a .js entry point is run through node.
+// exposes the launcher script, so a .js entry point goes through the shared
+// platform resolver (node on Windows, or on POSIX when the script has no execute
+// bit; otherwise the script's own shebang).
 //
 // The permission mode is NOT an argument: the launcher rejects
 // --permission-mode, so dshEnvironment passes it as DSH_PERMISSION_MODE.
@@ -92,19 +94,23 @@ func dshLaunch(executablePath string) (string, []string, error) {
 	if patch := strings.TrimSpace(os.Getenv("DSH_PATCH")); patch != "" {
 		args = append(args, "--patch", patch)
 	}
-	if strings.EqualFold(filepath.Ext(target), ".js") {
-		node, err := exec.LookPath("node")
-		if err != nil {
-			return "", nil, fmt.Errorf("dsh: %s needs node on PATH: %w", target, err)
-		}
-		return node, append([]string{target}, args...), nil
-	}
 
 	resolved, err := exec.LookPath(target)
-	if err != nil {
-		return "", nil, fmt.Errorf("dsh executable not found at %q: %w", target, err)
+	if err == nil {
+		// A real executable may still need an interpreter on this platform.
+		execPath, leadingArgs := resolveScriptCommand(resolved)
+		return execPath, append(leadingArgs, args...), nil
 	}
-	return resolved, args, nil
+
+	// A .js launcher has no execute bit on Windows, so the PATH lookup fails
+	// there even though node can run it.
+	if execPath, leadingArgs, adapted := adaptScriptCommand(resolveScriptCommand, target); adapted {
+		return execPath, append(leadingArgs, args...), nil
+	}
+	if isJavaScriptEntryPoint(target) {
+		return "", nil, fmt.Errorf("dsh: %s requires node on PATH: %w", target, err)
+	}
+	return "", nil, fmt.Errorf("dsh executable not found at %q: %w", target, err)
 }
 
 // resolveLaunch returns the executable and arguments for this backend, honouring
@@ -118,23 +124,6 @@ func (b *DshBackend) resolveLaunch() (string, []string, error) {
 		return resolved, b.launchArgs, nil
 	}
 	return dshLaunch(b.executablePath)
-}
-
-// resolveDshForDetection resolves the DSH command for local runtime detection.
-//
-// It mirrors the launch path so an operator who points the adapter at an explicit
-// launcher (DSH_BIN, for example a checkout's bin.js run through node) still sees
-// DSH as available, instead of it looking unavailable because `dsh` is not on
-// PATH. Only the --version probe differs from a real launch: the profile flags
-// are omitted, since the launcher reports its version without booting a profile.
-func resolveDshForDetection() (string, []string, error) {
-	execPath, args, err := dshLaunch(execPathOrDefault("", "DSH_BIN"))
-	if err != nil {
-		return "", nil, err
-	}
-	// args is nil for an executable and [<launcher.js>] for a script entry point,
-	// which is exactly what has to precede --version.
-	return execPath, args, nil
 }
 
 // dshDefaultPermissionMode keeps an unattended Daemon run from blocking on a

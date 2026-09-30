@@ -317,6 +317,43 @@ func TestDshDetectionRunsAScriptLauncherThroughNode(t *testing.T) {
 	}
 }
 
+// TestDshDetectionAdaptsANonExecutableLauncher covers the source checkout case
+// on both platforms: the launcher exists but is not a runnable program by path
+// (npm leaves bin.js without the execute bit on POSIX, and Windows has no
+// shebang at all), so detection must probe it through node.
+func TestDshDetectionAdaptsANonExecutableLauncher(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skipf("node is not on PATH: %v", err)
+	}
+	launcher := filepath.Join(t.TempDir(), "dsh.js")
+	if err := os.WriteFile(launcher, []byte("console.log('1.2.3')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_BIN", launcher)
+
+	var found *BackendStatus
+	for _, status := range GlobalRegistry().Detect() {
+		if status.Type == "dsh" {
+			candidate := status
+			found = &candidate
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("the dsh adapter is not registered")
+	}
+	if !found.Available {
+		t.Fatalf("a .js launcher was reported unavailable: %s", found.Error)
+	}
+	if !strings.Contains(found.Binary, "node") {
+		t.Fatalf("dsh binary = %q, want the node interpreter", found.Binary)
+	}
+	// The version proves the launcher itself was executed, not just node.
+	if found.Version != "1.2.3" {
+		t.Fatalf("dsh version = %q, want 1.2.3 printed by the launcher", found.Version)
+	}
+}
+
 // TestDshLaunchSelectsNodeForAScriptEntryPoint covers the launcher contract:
 // a .js entry point runs through node and carries the sdk profile, and the
 // permission mode is never passed as a flag (the launcher rejects it).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -68,12 +69,18 @@ func (c BackendCapabilities) normalized() BackendCapabilities {
 
 // AdapterMeta describes a registered backend adapter for discovery and UI.
 type AdapterMeta struct {
-	Type           string              `json:"type"`            // "claude", "codex", "opencode"...
-	DisplayName    string              `json:"display_name"`    // "Claude Code", "Codex CLI"
-	RequiresBinary string              `json:"requires_binary"` // CLI binary name, e.g. "claude", "codex", "opencode"
-	DetectCommand  string              `json:"-"`               // e.g. "--version"
-	Protocols      []string            `json:"protocols"`       // "stream-json", "json-rpc", "acp", "jsonl"
-	Capabilities   BackendCapabilities `json:"capabilities"`
+	Type           string `json:"type"`            // "claude", "codex", "opencode"...
+	DisplayName    string `json:"display_name"`    // "Claude Code", "Codex CLI"
+	RequiresBinary string `json:"requires_binary"` // CLI binary name, e.g. "claude", "codex", "opencode"
+	DetectCommand  string `json:"-"`               // e.g. "--version"
+	// BinaryOverrideEnv names environment variables that may point at the
+	// executable instead of RequiresBinary being on PATH, in priority order.
+	// The factories already honour these when launching, so detection has to
+	// honour them too: otherwise a runtime that launches perfectly is reported as
+	// unavailable and the UI never offers it. Example: DSH_BIN for dsh.
+	BinaryOverrideEnv []string            `json:"-"`
+	Protocols         []string            `json:"protocols"` // "stream-json", "json-rpc", "acp", "jsonl"
+	Capabilities      BackendCapabilities `json:"capabilities"`
 }
 
 // Meta returns the registered metadata for typ.
@@ -92,13 +99,21 @@ type BackendRegistry struct {
 	backends map[string]registryEntry
 }
 
+// ScriptCommandResolver adapts a resolved binary that is a launcher script
+// into the command that actually runs it, returning the executable plus any
+// arguments that must precede the detect command.
+//
+// Platforms that cannot execute a script by path (Windows and its launchers)
+// use it to insert the interpreter. It cannot live on AdapterMeta because
+// encoding/json rejects function-typed struct fields even when tagged `json:"-"`,
+// and AdapterMeta is marshalled for the API.
+type ScriptCommandResolver func(resolvedPath string) (execPath string, leadingArgs []string)
+
 type registryEntry struct {
 	Factory BackendFactory
 	Meta    AdapterMeta
-	// resolveBinary optionally overrides how local detection finds the CLI. It
-	// lives here rather than on AdapterMeta because that struct is serialized to
-	// the API, and a func field cannot be marshalled.
-	resolveBinary func() (execPath string, leadingArgs []string, err error)
+	// ResolveScript is nil for adapters whose binary is itself the executable.
+	ResolveScript ScriptCommandResolver
 }
 
 // globalRegistry is the package-level singleton.
@@ -112,31 +127,17 @@ func GlobalRegistry() *BackendRegistry { return globalRegistry }
 // Register adds a backend adapter to the registry. It overwrites any
 // existing entry with the same meta.Type. Safe for concurrent use.
 func (r *BackendRegistry) Register(meta AdapterMeta, factory BackendFactory) {
-	r.register(meta, factory, nil)
+	r.RegisterWithScriptResolver(meta, factory, nil)
 }
 
-// RegisterWithBinaryResolver registers an adapter whose local detection resolves
-// its CLI through resolveBinary instead of a PATH lookup of RequiresBinary. Use
-// it for adapters that are commonly pointed at an explicit launcher, so they are
-// not reported as unavailable merely because the binary is not installed
-// globally.
-func (r *BackendRegistry) RegisterWithBinaryResolver(
-	meta AdapterMeta,
-	factory BackendFactory,
-	resolveBinary func() (execPath string, leadingArgs []string, err error),
-) {
-	r.register(meta, factory, resolveBinary)
-}
-
-func (r *BackendRegistry) register(
-	meta AdapterMeta,
-	factory BackendFactory,
-	resolveBinary func() (execPath string, leadingArgs []string, err error),
-) {
+// RegisterWithScriptResolver is Register for adapters whose resolved binary may
+// be a launcher script; see ScriptCommandResolver. Passing a nil resolver makes
+// it identical to Register. Safe for concurrent use.
+func (r *BackendRegistry) RegisterWithScriptResolver(meta AdapterMeta, factory BackendFactory, resolver ScriptCommandResolver) {
 	meta.Capabilities = meta.Capabilities.normalized()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.backends[meta.Type] = registryEntry{Factory: factory, Meta: meta, resolveBinary: resolveBinary}
+	r.backends[meta.Type] = registryEntry{Factory: factory, Meta: meta, ResolveScript: resolver}
 }
 
 // Create constructs a Backend of the given type using the supplied config.
@@ -161,10 +162,11 @@ type BackendStatus struct {
 	Error       string `json:"error,omitempty"`
 }
 
-// Detect checks every registered backend for local availability by looking up
-// its binary with exec.LookPath, or by asking the adapter to resolve it first.
-// If found and a DetectCommand is configured, it also captures the version
-// output. Each check is capped at 5 seconds.
+// Detect checks every registered backend for local availability by resolving its
+// executable, preferring the declared BinaryOverrideEnv variables over PATH and
+// then letting the adapter adapt a launcher script for this platform. If the
+// executable is found and a DetectCommand is configured, it also captures the
+// version output. Each check is capped at 5 seconds.
 func (r *BackendRegistry) Detect() []BackendStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -177,28 +179,14 @@ func (r *BackendRegistry) Detect() []BackendStatus {
 			Binary:      entry.Meta.RequiresBinary,
 		}
 
-		execPath := ""
-		leadingArgs := []string(nil)
-		if entry.resolveBinary != nil {
-			resolved, args, err := entry.resolveBinary()
-			if err != nil {
-				status.Available = false
-				status.Error = err.Error()
-				results = append(results, status)
-				continue
-			}
-			execPath, leadingArgs = resolved, args
-			status.Binary = resolved
-		} else {
-			path, err := exec.LookPath(entry.Meta.RequiresBinary)
-			if err != nil {
-				status.Available = false
-				status.Error = err.Error()
-				results = append(results, status)
-				continue
-			}
-			execPath = path
+		execPath, leadingArgs, err := resolveBackendBinary(entry)
+		if err != nil {
+			status.Available = false
+			status.Error = err.Error()
+			results = append(results, status)
+			continue
 		}
+		status.Binary = execPath
 
 		status.Available = true
 		if entry.Meta.DetectCommand != "" {
@@ -216,6 +204,61 @@ func (r *BackendRegistry) Detect() []BackendStatus {
 		results = append(results, status)
 	}
 	return results
+}
+
+// resolveBackendBinary finds the command that detection should run for one
+// backend, returning the executable plus any arguments that must precede the
+// detect command.
+//
+// A BinaryOverrideEnv variable that is set takes precedence over PATH, which
+// mirrors what the backend's factory does when it builds the command. Falling
+// back to PATH keeps the documented "…or the binary on PATH" behaviour.
+//
+// A resolved path may be a launcher script rather than an executable; the
+// adapter's ScriptCommandResolver turns it into an interpreter invocation. That
+// resolver also gets a chance when exec.LookPath rejects the override outright,
+// which is what a .js entry point looks like on every platform.
+func resolveBackendBinary(entry registryEntry) (string, []string, error) {
+	meta := entry.Meta
+
+	if name, override, ok := binaryOverride(meta.BinaryOverrideEnv); ok {
+		resolved, err := exec.LookPath(override)
+		if err != nil {
+			if execPath, leadingArgs, adapted := adaptScriptCommand(entry.ResolveScript, override); adapted {
+				return execPath, leadingArgs, nil
+			}
+			return "", nil, fmt.Errorf("%s=%s: %w", name, override, err)
+		}
+		return scriptCommand(entry.ResolveScript, resolved)
+	}
+
+	resolved, err := exec.LookPath(meta.RequiresBinary)
+	if err != nil {
+		return "", nil, err
+	}
+	return scriptCommand(entry.ResolveScript, resolved)
+}
+
+// binaryOverride returns the first BinaryOverrideEnv variable that is set.
+func binaryOverride(names []string) (name, value string, ok bool) {
+	for _, candidate := range names {
+		if v := strings.TrimSpace(os.Getenv(candidate)); v != "" {
+			return candidate, v, true
+		}
+	}
+	return "", "", false
+}
+
+// scriptCommand applies an adapter's script resolver to a resolved executable.
+func scriptCommand(resolver ScriptCommandResolver, resolved string) (string, []string, error) {
+	if resolver == nil {
+		return resolved, nil, nil
+	}
+	execPath, leadingArgs := resolver(resolved)
+	if execPath == "" {
+		return "", nil, fmt.Errorf("script resolver returned no command for %q", resolved)
+	}
+	return execPath, leadingArgs, nil
 }
 
 // ListMeta returns a snapshot of AdapterMeta for every registered backend.
