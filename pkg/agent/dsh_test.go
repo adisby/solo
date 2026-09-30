@@ -389,3 +389,86 @@ func TestDshEnvironmentDefaultsPermissionMode(t *testing.T) {
 		t.Fatalf("caller permission mode was overwritten: %q", env["DSH_PERMISSION_MODE"])
 	}
 }
+
+// The SDK protocol has no system-prompt field, so the only way the Agent learns
+// Solo's operating contract — channel context and the `solo message send`
+// delivery command — is a workspace instruction file that
+// @deepseek-ai/dsh-agent-instructions loads on the first request.
+func TestDshWritesSystemPromptIntoWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	prompt := "You are a Solo Agent.\nDeliver with: solo message send -c <content> --target <target>\n"
+
+	if err := writeDshInstructions(workspace, prompt); err != nil {
+		t.Fatalf("writeDshInstructions: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(workspace, dshInstructionsFileName))
+	if err != nil {
+		t.Fatalf("read %s: %v", dshInstructionsFileName, err)
+	}
+	if string(got) != prompt {
+		t.Fatalf("instruction file = %q, want %q", got, prompt)
+	}
+}
+
+// The file name has to stay a bare entry in the session cwd: a subdirectory
+// path is accepted by the plugin's config schema but never matches during
+// discovery, which silently drops the whole operating contract.
+func TestDshInstructionsFileNameIsFlat(t *testing.T) {
+	if strings.ContainsAny(dshInstructionsFileName, `/\`) {
+		t.Fatalf("%s must be a bare file name in the workspace, not a path", dshInstructionsFileName)
+	}
+}
+
+func TestDshSkipsInstructionFileWithoutPromptOrWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+
+	if err := writeDshInstructions(workspace, ""); err != nil {
+		t.Fatalf("writeDshInstructions with an empty prompt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, dshInstructionsFileName)); !os.IsNotExist(err) {
+		t.Fatalf("an empty prompt created an instruction file (err=%v)", err)
+	}
+
+	if err := writeDshInstructions("", "prompt"); err != nil {
+		t.Fatalf("writeDshInstructions with no workspace: %v", err)
+	}
+
+	// A read-only workspace must surface the failure rather than start an Agent
+	// that has no idea how to reply.
+	readonly := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDshInstructions(readonly, "prompt"); err == nil {
+		t.Fatal("writeDshInstructions into a read-only workspace returned nil, want an error")
+	}
+}
+
+// Through the real adapter: a turn must leave the operating contract in the
+// workspace, because the instructions plugin captures its baseline on the first
+// request and the SDK protocol cannot carry a system prompt itself.
+func TestDshBackendDeliversSystemPromptToWorkspace(t *testing.T) {
+	backend := dshTestBackend(t)
+	workspace := t.TempDir()
+	systemPrompt := "You are a Solo Agent.\nDeliver with: solo message send -c <content> --target <target>\n"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	session, err := backend.Execute(ctx, &ExecuteRequest{
+		AgentID:  "dsh-system-prompt",
+		Messages: []Message{{Role: "user", Content: "hello harness"}},
+	}, &ExecuteOptions{WorkspaceDir: workspace, SystemPrompt: systemPrompt})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	collectDshTurn(t, session.Messages, session.Result)
+
+	got, err := os.ReadFile(filepath.Join(workspace, dshInstructionsFileName))
+	if err != nil {
+		t.Fatalf("Execute left no %s in the workspace: %v", dshInstructionsFileName, err)
+	}
+	if string(got) != systemPrompt {
+		t.Fatalf("%s = %q, want %q", dshInstructionsFileName, got, systemPrompt)
+	}
+}

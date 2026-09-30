@@ -31,6 +31,43 @@ process, so a restart starts a new conversation even though DSH could rebuild th
 old one from its session log. The SDK protocol has no cancel request, so `Stop`
 ends the process instead of interrupting a turn.
 
+## System prompt delivery
+
+The SDK protocol has **no system-prompt field**: `initialize` accepts only
+`cwd`, `provider`, `model` and `reasoningEffort`, and the adapters that use a
+dedicated flag (claude's `--append-system-prompt-file`) have no equivalent here.
+
+The only channel is `@deepseek-ai/dsh-agent-instructions`, which loads
+instruction files from the workspace. `DshBackend.Start` therefore writes
+`opts.SystemPrompt` to **`<cwd>/SOLO.md`** before launching DSH, and the profile
+must list that name in `agent-instructions.instructionFileCandidates`:
+
+```yaml
+- id: agent-instructions
+  config:
+    maxBytes: 65536
+    instructionFileCandidates:
+      - AGENTS.md
+      - CLAUDE.md
+      - SOLO.md
+```
+
+Two properties of this mechanism matter:
+
+- **The name must be a bare file in the session cwd.** The candidate resolution
+  is same-directory only. A subdirectory path such as `.solo/system-prompt.md`
+  passes config validation and then never matches during discovery, so the
+  instructions silently never load — verified against 0.2.0-rc.2.
+- **It is additive.** The workspace's own `AGENTS.md` / `CLAUDE.md` still load
+  alongside `SOLO.md`, so the Agent keeps its project knowledge.
+
+Without this, the Agent never receives the operating contract that
+`BuildSystemPrompt` assembles — including `solo message send`, the command it is
+expected to deliver replies with. The failure is not a clean error: the Agent
+reasons about how to reach the channel, hunts for an HTTP endpoint instead, and
+burns its whole turn until the 6-minute execution watchdog cancels it with zero
+tokens.
+
 ## Requirements
 
 1. **DSH with an `sdk` profile.** `sdk` is not a shipped profile name; create it

@@ -154,6 +154,48 @@ func dshEnvironment(extra map[string]string) map[string]string {
 	return env
 }
 
+// dshInstructionsFileName is the file in the Agent workspace that carries Solo's
+// system prompt into a DSH session.
+//
+// The SDK protocol has no system-prompt field — `initialize` accepts only cwd,
+// provider, model and reasoningEffort — so the only channel left is
+// @deepseek-ai/dsh-agent-instructions, which reads instruction files from the
+// workspace. Without it the Agent never receives the Solo operating contract,
+// including how to deliver a reply with `solo message send`, and instead burns
+// its whole turn hunting for an API to post through.
+//
+// The name must be a bare file in the session cwd. The plugin's candidate
+// resolution is same-directory only: a subdirectory path such as
+// `.solo/system-prompt.md` passes config validation but never matches during
+// discovery, so the instructions would silently never load.
+//
+// A DSH sdk profile has to list this name in the `agent-instructions`
+// instructionFileCandidates, because it is not one of the built-in defaults.
+const dshInstructionsFileName = "SOLO.md"
+
+// writeDshInstructions materialises Solo's system prompt inside the Agent
+// workspace, which is also the DSH session cwd.
+//
+// Unlike claude's --append-system-prompt-file, this file is additive: the
+// workspace's own AGENTS.md / CLAUDE.md still load alongside it.
+//
+// A write failure is reported rather than ignored. An Agent that starts without
+// its operating contract looks busy and then times out, which is far harder to
+// diagnose than a failed launch.
+func writeDshInstructions(workspaceDir, systemPrompt string) error {
+	if strings.TrimSpace(systemPrompt) == "" {
+		return nil
+	}
+	if strings.TrimSpace(workspaceDir) == "" {
+		return nil
+	}
+	path := filepath.Join(workspaceDir, dshInstructionsFileName)
+	if err := os.WriteFile(path, []byte(systemPrompt), 0o644); err != nil {
+		return fmt.Errorf("dsh: write %s: %w", dshInstructionsFileName, err)
+	}
+	return nil
+}
+
 // dshResolveRoute picks the provider route and model for one execution.
 func dshResolveRoute(opts *ExecuteOptions) (provider, model string) {
 	provider = strings.TrimSpace(os.Getenv("DSH_PROVIDER"))
@@ -792,6 +834,12 @@ func (b *DshBackend) Start(ctx context.Context, req *ExecuteRequest, opts *Execu
 		return nil, err
 	}
 	b.logger.Info("dsh: starting persistent session", "exec", execPath, "args", args)
+
+	// The workspace instruction file must exist before DSH boots, because the
+	// instructions plugin captures its baseline on the first request.
+	if err := writeDshInstructions(opts.WorkspaceDir, opts.SystemPrompt); err != nil {
+		return nil, err
+	}
 
 	runner, err := startPersistent(ctx, execPath, args, opts.WorkspaceDir, dshEnvironment(opts.Env), b.logger)
 	if err != nil {
