@@ -765,10 +765,16 @@ func (h *daemonHandler) startTask(req runTaskRequest, attemptID string) error {
 
 	slog.Info("task received",
 		"task_id", req.TaskID,
+		"run_id", req.RunID,
 		"agent_id", req.AgentID,
 		"channel_id", req.ChannelID,
 		"model", req.ModelConfig.Model,
 		"provider", req.ModelConfig.Provider,
+		// A Run token travels only in the accept envelope, and it reaches an agent
+		// process only when that process is created. Record whether this turn
+		// carried one: without this field the Daemon cannot tell "the Server sent
+		// no token" from "the token was dropped locally". The value is never logged.
+		"agent_token_present", req.AgentToken != "",
 	)
 
 	// Process the task asynchronously with streaming
