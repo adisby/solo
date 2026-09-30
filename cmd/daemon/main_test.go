@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +30,47 @@ func TestDaemonDeclaresContextRolloverCapability(t *testing.T) {
 		}
 	}
 	t.Fatalf("daemon capabilities %v do not include %q", daemonCapabilities(), want)
+}
+
+func TestDaemonPortRecordOnlyRemovesItsOwnPort(t *testing.T) {
+	dir := t.TempDir()
+	path, err := writeDaemonPortRecord(dir, os.Getpid(), 8081)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "8081" {
+		t.Fatalf("port record = %q, want 8081", got)
+	}
+
+	// A record naming another port belongs to another Daemon.
+	if err := os.WriteFile(path, []byte("49443\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDaemonPortRecord(path, 8081); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("another Daemon's port record was removed: %v", err)
+	}
+
+	if _, err := writeDaemonPortRecord(dir, os.Getpid(), 8081); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDaemonPortRecord(path, 8081); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("own port record still exists: %v", err)
+	}
+
+	// A record that was never written must not turn shutdown into an error.
+	if err := removeDaemonPortRecord("", 8081); err != nil {
+		t.Fatalf("removeDaemonPortRecord with no path: %v", err)
+	}
 }
 
 func TestDaemonProcessRecordOnlyRemovesItsOwnPID(t *testing.T) {

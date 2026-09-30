@@ -67,6 +67,20 @@ file remains the local identity source of truth:
 Daemon process state uses `~/.solo/daemon/daemon.pid` and
 `~/.solo/daemon/daemon.log`. The PID is validated before signals are sent.
 
+The Daemon also owns the `port` record in its own state directory (`~/.solo/daemon`
+for the default profile, `~/.solo/daemons/<profile>/` for a named one). It writes
+the port it actually bound once the listener exists, and removes the record on
+clean shutdown only while the record still names that port. A Daemon that cannot
+bind removes the PID record and the machine lock it took before exiting.
+
+Readers — `solo daemon status`, `solo daemon logs`,
+`scripts/autostart-daemon.ps1 -Status` — must not allocate a port while observing
+a Daemon, and must not trust the record alone: a Daemon started without
+`DAEMON_PORT` (the Windows logon task does that) binds the built-in default, so a
+record left by an earlier launch names a port nobody holds. `/health` publishes
+`pid` and `port` for exactly that reason, and the CLI only rewrites the record
+after a Daemon proves it holds the probed port.
+
 ## 3. Ownership and lifecycle
 
 ### 3.1 Registration

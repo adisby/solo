@@ -32,6 +32,11 @@ type healthResponse struct {
 	Timestamp        string `json:"timestamp"`
 	Version          string `json:"version"`
 	ControlConnected bool   `json:"control_connected"`
+	// PID and Port let a local client prove which Daemon answered. A profile can
+	// be launched with a port record left over from an earlier run, so the answer
+	// alone is not evidence that it came from the Daemon the record describes.
+	PID  int `json:"pid"`
+	Port int `json:"port"`
 }
 
 var (
@@ -45,6 +50,10 @@ var (
 	daemonH       *daemonHandler
 	workspaceMgr  *agent.WorkspaceManager
 	controlReady  atomic.Bool
+	// boundPort is the port this process actually bound. It is published in the
+	// health document and in the port record instead of DAEMON_PORT because a
+	// Daemon started without that variable falls back to the built-in default.
+	boundPort atomic.Int32
 )
 
 const contextRolloverCapability = "context_rollover_v1"
@@ -68,6 +77,9 @@ func main() {
 	if port == "" {
 		port = "8081"
 	}
+	// The state directory is the profile's own directory. Every runtime record
+	// this process owns — pid, port — is written there.
+	stateDir := strings.TrimSpace(os.Getenv("SOLO_DAEMON_STATE_DIR"))
 
 	ctx := context.Background()
 	var err error
@@ -93,13 +105,13 @@ func main() {
 	// The lock is per managed Daemon profile. Multiple independently paired
 	// profiles may run on one physical machine, while a duplicate start of the
 	// same profile is still rejected.
-	machineLock, err = agent.AcquireLock(strings.TrimSpace(os.Getenv("SOLO_DAEMON_STATE_DIR")), serverURL)
+	machineLock, err = agent.AcquireLock(stateDir, serverURL)
 	if err != nil {
 		slog.Error("failed to acquire machine lock — another daemon may be running", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("machine lock acquired", "pid", machineLock.PID)
-	pidPath, err := writeDaemonProcessRecord(strings.TrimSpace(os.Getenv("SOLO_DAEMON_STATE_DIR")), machineLock.PID)
+	pidPath, err := writeDaemonProcessRecord(stateDir, machineLock.PID)
 	if err != nil {
 		_ = machineLock.Release()
 		slog.Error("failed to write daemon process record", "error", err)
@@ -149,6 +161,8 @@ func main() {
 			Timestamp:        time.Now().UTC().Format(time.RFC3339),
 			Version:          version.Version,
 			ControlConnected: controlReady.Load(),
+			PID:              os.Getpid(),
+			Port:             int(boundPort.Load()),
 		})
 	})
 
@@ -185,9 +199,33 @@ func main() {
 	defer stop()
 	go h.runSessionReaper(ctx)
 
+	// Bind before serving: the Daemon owns the port record, and only the bound
+	// listener knows the port. Re-deriving it from DAEMON_PORT would misreport a
+	// Daemon that fell back to the built-in default, which is how a profile ends
+	// up advertising a port it never held.
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		slog.Error("daemon server error", "error", err)
+		// The lock and process record were written before the bind. A Daemon that
+		// never listened must not leave records that describe a live one.
+		if removeErr := removeDaemonProcessRecord(pidPath, machineLock.PID); removeErr != nil {
+			slog.Warn("failed to remove daemon process record", "error", removeErr)
+		}
+		if releaseErr := machineLock.Release(); releaseErr != nil {
+			slog.Warn("failed to release machine lock", "error", releaseErr)
+		}
+		os.Exit(1)
+	}
+	boundPort.Store(int32(listener.Addr().(*net.TCPAddr).Port))
+	portPath, err := writeDaemonPortRecord(stateDir, machineLock.PID, int(boundPort.Load()))
+	if err != nil {
+		slog.Warn("failed to write daemon port record", "error", err)
+		portPath = ""
+	}
+
 	go func() {
-		slog.Info("daemon server starting", "addr", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Info("daemon server starting", "addr", listener.Addr().String())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("daemon server error", "error", err)
 			os.Exit(1)
 		}
@@ -250,6 +288,9 @@ func main() {
 			slog.Info("machine lock released")
 		}
 	}
+	if err := removeDaemonPortRecord(portPath, int(boundPort.Load())); err != nil {
+		slog.Warn("failed to remove daemon port record", "error", err)
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -298,6 +339,48 @@ func removeDaemonProcessRecord(path string, pid int) error {
 	return os.Remove(path)
 }
 
+// writeDaemonPortRecord records the port this Daemon bound. The record belongs
+// to the running process, not to whoever launched it: a Daemon started without
+// DAEMON_PORT — the Windows logon task does exactly that — binds the built-in
+// default, and a record left over from an earlier launch would otherwise send
+// every reader (status, logs, the autostart check) to a port nobody holds.
+func writeDaemonPortRecord(stateDir string, pid, port int) (string, error) {
+	if stateDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		stateDir = filepath.Join(home, ".solo", "daemon")
+	}
+	path := filepath.Join(stateDir, "port")
+	if err := os.WriteFile(path, []byte(strconv.Itoa(port)+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	slog.Info("daemon port recorded", "pid", pid, "port", port, "path", path)
+	return path, nil
+}
+
+// removeDaemonPortRecord removes the port record only while it still names this
+// Daemon's port, so a stopping Daemon cannot erase the record of the Daemon
+// that replaced it.
+func removeDaemonPortRecord(path string, port int) error {
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	recorded, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || recorded != port {
+		return nil
+	}
+	return os.Remove(path)
+}
+
 // registerWithServer sends a registration request to the server.
 func registerWithServer(ctx context.Context) error {
 	if serverURL == "" {
@@ -311,10 +394,14 @@ func registerWithServer(ctx context.Context) error {
 	if strings.Contains(serverURL, "localhost") || strings.Contains(serverURL, "127.0.0.1") {
 		host = "127.0.0.1"
 	}
-	portStr := os.Getenv("DAEMON_PORT")
-	port := 8081
-	if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
-		port = p
+	// Registration must name the endpoint the Server can reach, so it uses the
+	// bound port instead of re-deriving one from DAEMON_PORT.
+	port := int(boundPort.Load())
+	if port == 0 {
+		port = 8081
+		if p, err := strconv.Atoi(os.Getenv("DAEMON_PORT")); err == nil && p > 0 {
+			port = p
+		}
 	}
 
 	req := daemonRegisterPayload{

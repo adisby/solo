@@ -102,6 +102,12 @@ One machine can also host several independently paired Daemons. Give each one a
 profile; Solo keeps separate credentials, PID, log, lock, and a stable local port
 under `~/.solo/daemons/<profile>/`:
 
+The Daemon writes the port record itself once it binds, so it names the port the
+Daemon really holds even when the Daemon was started without `DAEMON_PORT` — which
+is what the Windows logon task does. `solo daemon status` validates that record
+against the Daemon's `/health` answer (pid and port) instead of trusting it, and
+reports the port it used.
+
 ```bash
 solo daemon connect --profile studio-a --server 'https://solo.example.com' --computer-id '...' --token '...'
 solo daemon connect --profile studio-b --server 'https://solo.example.com' --computer-id '...' --token '...'

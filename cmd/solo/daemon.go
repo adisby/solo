@@ -28,6 +28,12 @@ type managedDaemonCredential struct {
 
 const defaultDaemonProfile = "default"
 
+// defaultDaemonPort is the port a Daemon binds when nothing selected another
+// one, including a Daemon started without DAEMON_PORT by the logon task. It is a
+// variable rather than a constant so a test can put a stand-in Daemon on an
+// ephemeral port.
+var defaultDaemonPort = 8081
+
 func handleDaemonCommand(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "solo: daemon command required: connect, start, stop, restart, status, logs")
@@ -386,7 +392,20 @@ func printDaemonStatusProfile(profile string) error {
 		return errors.New("not running")
 	}
 	fmt.Printf("Solo Daemon %q is running (pid %d).\n", profile, pid)
-	fmt.Printf("Remote control: %s\n", map[bool]string{true: "connected", false: "connecting"}[managedDaemonConnectedProfile(profile)])
+	endpoint, answered := managedDaemonEndpoint(profile, pid)
+	fmt.Printf("Remote control: %s\n", map[bool]string{true: "connected", false: "connecting"}[answered && endpoint.connected])
+	switch {
+	case !answered:
+		if port, ok := recordedDaemonPort(profile); ok {
+			fmt.Printf("Port: %d (no Daemon answered there)\n", port)
+		}
+	case endpoint.repairedFrom != 0:
+		fmt.Printf("Port: %d (replaced a stale port record that named %d)\n", endpoint.port, endpoint.repairedFrom)
+	case !endpoint.verified:
+		fmt.Printf("Port: %d (identity unverified: this Daemon does not report its pid)\n", endpoint.port)
+	default:
+		fmt.Printf("Port: %d\n", endpoint.port)
+	}
 	path, _ := managedProfileCredentialPath(profile)
 	if raw, err := os.ReadFile(path); err == nil {
 		var credential managedDaemonCredential
@@ -401,21 +420,142 @@ func managedDaemonConnected() bool {
 	return managedDaemonConnectedProfile(defaultDaemonProfile)
 }
 
+// daemonHealthDoc is the part of the Daemon health document this CLI validates.
+// PID is the identity check: a port record can name a port that an earlier
+// launch, or another profile's Daemon, is holding.
+type daemonHealthDoc struct {
+	ControlConnected bool `json:"control_connected"`
+	PID              int  `json:"pid"`
+	Port             int  `json:"port"`
+}
+
+// daemonEndpoint is a Daemon that answered a health probe.
+type daemonEndpoint struct {
+	port      int
+	connected bool
+	// verified is true when the Daemon named its own pid and it matched the pid
+	// recorded in the profile's state directory. Only a verified endpoint may
+	// rewrite the port record: an unverified one may be another profile's Daemon.
+	verified bool
+	// repairedFrom is the stale port the record named before it was rewritten.
+	repairedFrom int
+}
+
+// daemonPortCandidate is one port worth probing, and whether the profile's own
+// record named it.
+type daemonPortCandidate struct {
+	port     int
+	recorded bool
+}
+
 func managedDaemonConnectedProfile(profile string) bool {
-	port, err := daemonProfilePort(profile)
-	if err != nil {
-		return false
+	// A profile without a live pid record still answers here — the caller may be
+	// asking before a pid is known — so identity is only enforced when both
+	// sides can be compared.
+	pid, _ := daemonProfilePID(profile)
+	endpoint, ok := managedDaemonEndpoint(profile, pid)
+	return ok && endpoint.connected
+}
+
+// managedDaemonEndpoint resolves where a profile's Daemon answers.
+//
+// The port the profile recorded is tried first, then the built-in default,
+// because a Daemon started without DAEMON_PORT binds the default — that is how a
+// stale record is discovered. The pid in the health document is what makes the
+// second candidate safe: a Daemon that reports a different pid is rejected
+// instead of being mistaken for this profile's.
+func managedDaemonEndpoint(profile string, pid int) (daemonEndpoint, bool) {
+	recordedPort, hasRecord := recordedDaemonPort(profile)
+	for _, candidate := range daemonPortCandidates(profile) {
+		endpoint, ok := probeDaemonEndpoint(candidate.port, pid, candidate.recorded)
+		if !ok {
+			continue
+		}
+		if endpoint.verified && (!hasRecord || recordedPort != endpoint.port) {
+			// The Daemon proved which port it holds, so make the record truthful
+			// and let every later reader agree without probing.
+			if path, err := daemonProfileStatePath(profile, "port"); err == nil {
+				if err := os.WriteFile(path, []byte(strconv.Itoa(endpoint.port)+"\n"), 0o600); err == nil && hasRecord {
+					endpoint.repairedFrom = recordedPort
+				}
+			}
+		}
+		return endpoint, true
 	}
+	return daemonEndpoint{}, false
+}
+
+// daemonPortCandidates lists the ports worth probing for a profile.
+func daemonPortCandidates(profile string) []daemonPortCandidate {
+	candidates := make([]daemonPortCandidate, 0, 2)
+	if port, ok := recordedDaemonPort(profile); ok {
+		candidates = append(candidates, daemonPortCandidate{port: port, recorded: true})
+	}
+	if len(candidates) == 0 || candidates[0].port != defaultDaemonPort {
+		candidates = append(candidates, daemonPortCandidate{port: defaultDaemonPort})
+	}
+	return candidates
+}
+
+// recordedDaemonPort reads the port a profile's Daemon last bound. It never
+// allocates: observing a Daemon must not choose a new port as a side effect of
+// looking at it.
+func recordedDaemonPort(profile string) (int, bool) {
+	if profile == defaultDaemonProfile {
+		if raw := strings.TrimSpace(os.Getenv("DAEMON_PORT")); raw != "" {
+			if port, err := strconv.Atoi(raw); err == nil && port > 0 && port <= 65535 {
+				return port, true
+			}
+		}
+	}
+	path, err := daemonProfileStatePath(profile, "port")
+	if err != nil {
+		return 0, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, false
+	}
+	return port, true
+}
+
+// probeDaemonEndpoint asks the Daemon on a port to identify itself. A Daemon
+// that reports a pid must be the process this profile recorded, and a Daemon
+// that reports a port must be holding the one that was probed. A Daemon that
+// reports neither — an older build — is accepted only on the recorded port,
+// which is exactly the trust earlier clients placed in that record.
+func probeDaemonEndpoint(port, pid int, recorded bool) (daemonEndpoint, bool) {
 	client := &http.Client{Timeout: time.Second}
 	response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/health")
 	if err != nil {
-		return false
+		return daemonEndpoint{}, false
 	}
 	defer response.Body.Close()
-	var health struct {
-		ControlConnected bool `json:"control_connected"`
+	if response.StatusCode != http.StatusOK {
+		return daemonEndpoint{}, false
 	}
-	return response.StatusCode == http.StatusOK && json.NewDecoder(response.Body).Decode(&health) == nil && health.ControlConnected
+	var health daemonHealthDoc
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		return daemonEndpoint{}, false
+	}
+	if health.Port != 0 && health.Port != port {
+		// Something else answered for a port it does not hold.
+		return daemonEndpoint{}, false
+	}
+	if health.PID != 0 && pid != 0 {
+		if health.PID != pid {
+			return daemonEndpoint{}, false
+		}
+		return daemonEndpoint{port: port, connected: health.ControlConnected, verified: true}, true
+	}
+	if !recorded {
+		return daemonEndpoint{}, false
+	}
+	return daemonEndpoint{port: port, connected: health.ControlConnected}, true
 }
 
 func printDaemonLogs() error {
@@ -431,12 +571,52 @@ func printDaemonLogsProfile(profile string) error {
 	if err != nil {
 		return err
 	}
+	if note := staleDaemonLogNote(profile, path); note != "" {
+		fmt.Fprintf(os.Stderr, "solo: %s\n", note)
+	}
 	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
 	if len(lines) > 100 {
 		lines = lines[len(lines)-100:]
 	}
 	fmt.Println(strings.Join(lines, "\n"))
 	return nil
+}
+
+// staleDaemonLogNote reports when the log file is older than the running Daemon.
+// The Daemon writes JSON to stdout, so this file only receives output from a
+// Daemon the CLI started with that stdout attached. A Daemon started by the
+// Windows logon task has no such redirection, and its predecessor's log must not
+// be presented as the current one.
+func staleDaemonLogNote(profile, logPath string) string {
+	pid, running := daemonProfilePID(profile)
+	if !running {
+		return ""
+	}
+	logInfo, err := os.Stat(logPath)
+	if err != nil {
+		return ""
+	}
+	started, ok := daemonStartRecordTime(profile)
+	if !ok || !started.After(logInfo.ModTime()) {
+		return ""
+	}
+	return fmt.Sprintf("this log was last written before Daemon %d started, so it belongs to an earlier run; the running Daemon logs to stdout (start it with 'solo daemon start' to capture logs here)", pid)
+}
+
+// daemonStartRecordTime reports when the running Daemon wrote its startup
+// records. The machine lock is preferred because the Daemon writes it once when
+// it starts, while a missing daemon.pid is repaired from the lock by this CLI.
+func daemonStartRecordTime(profile string) (time.Time, bool) {
+	for _, name := range []string{"lock.json", "daemon.pid"} {
+		path, err := daemonProfileStatePath(profile, name)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(path); err == nil {
+			return info.ModTime(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func daemonProfilePort(profile string) (int, error) {
