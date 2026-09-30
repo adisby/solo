@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -96,32 +98,36 @@ func TestBuildSystemPrompt_RelationshipsBeforeMessaging(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_CLICommands(t *testing.T) {
-	p := BuildSystemPrompt(AgentConfig{Name: "Bot"}, ChannelContext{TriggerType: TriggerChat}, "", nil)
-	assertHas(t, p, "Communication — solo CLI ONLY")
-	assertHas(t, p, "solo task list")
-	assertHas(t, p, "solo task claim")
-	assertHas(t, p, "solo task submit")
-	assertHas(t, p, "solo task accept")
-	assertHas(t, p, "solo task reject")
-	assertHas(t, p, "solo task create")
-	assertHas(t, p, "solo task unclaim")
-	assertHas(t, p, "solo message send")
-	assertHas(t, p, "solo message read")
-	assertHas(t, p, "solo message check")
-	assertHas(t, p, "solo channel members")
-	assertHas(t, p, "solo server info")
-	assertHas(t, p, "solo thread unfollow")
-	assertHas(t, p, "solo channel join")
+	// A WorkspacePath is required for the command templates to resolve to real
+	// commands; without one the invocation token stays unrendered.
+	p := BuildSystemPrompt(
+		AgentConfig{Name: "Bot", WorkspacePath: "/tmp/ws"},
+		ChannelContext{TriggerType: TriggerChat}, "", nil,
+	)
+	assertHas(t, p, "Communication — the solo CLI ONLY")
+	soloCLI := "'" + filepath.Join("/tmp/ws", "solo") + "'"
+	commands := []string{
+		"task list", "task claim", "task submit", "task accept", "task reject",
+		"task create", "task unclaim", "message send", "message read", "message check",
+		"channel members", "server info", "thread unfollow", "channel join",
+	}
+	for _, cmd := range commands {
+		assertHas(t, p, soloCLI+" "+cmd)
+	}
 	assertHas(t, p, "only output channel")
 }
 
 func TestBuildSystemPrompt_UsesWorkspaceSoloCLI(t *testing.T) {
+	workspace := "/tmp/bot-workspace"
 	p := BuildSystemPrompt(
-		AgentConfig{Name: "Bot", WorkspacePath: "/tmp/bot-workspace"},
+		AgentConfig{Name: "Bot", WorkspacePath: workspace},
 		ChannelContext{TriggerType: TriggerChat}, "", nil,
 	)
-	assertHas(t, p, "/tmp/bot-workspace/solo message send")
-	assertNotHas(t, p, "`solo message send")
+	// The invoked path is quoted so a workspace containing spaces still runs.
+	assertHas(t, p, "'"+filepath.Join(workspace, "solo")+"' message send")
+	assertNotHas(t, p, soloInvocationToken)
+	assertNotHas(t, p, soloPathToken)
+	assertNotHas(t, p, soloInvocationToken)
 }
 
 func TestBuildSystemPrompt_MentionedNames(t *testing.T) {
@@ -309,6 +315,68 @@ func TestBuildSystemPrompt_MentionsSection(t *testing.T) {
 	p := BuildSystemPrompt(AgentConfig{Name: "Bot"}, ChannelContext{TriggerType: TriggerChat}, "", nil)
 	assertHas(t, p, "@Mentions")
 	assertHas(t, p, "Mention others, not yourself")
+}
+
+func TestBuildSystemPrompt_WindowsAgentGetsPowerShell(t *testing.T) {
+	workspace := `C:\Users\dev\.solo\agents\a1\workspace`
+	p := BuildSystemPrompt(
+		AgentConfig{Name: "Bot", OS: "windows amd64", WorkspacePath: workspace},
+		ChannelContext{TriggerType: TriggerChat}, "", nil,
+	)
+	assertHas(t, p, "Run one command per tool call, via PowerShell")
+	assertHas(t, p, "a here-string")
+	assertNotHas(t, p, "heredoc")
+	// The workspace copy must carry its executable extension: Windows cannot run
+	// an extensionless PE copy. Every command template goes through the invocation
+	// token, so the quoted call-operator form must be present. The separator is
+	// built with filepath.Join because this test also runs on POSIX.
+	soloCLI := filepath.Join(workspace, "solo.exe")
+	assertHas(t, p, "& '"+soloCLI+"' message send")
+	assertNotHas(t, p, filepath.Join(workspace, "solo")+" ")
+	assertNotHas(t, p, soloInvocationToken)
+	assertNotHas(t, p, "```bash")
+	// A Windows Agent has no `cat`.
+	assertHas(t, p, "Get-Content -Raw -LiteralPath")
+}
+
+func TestBuildSystemPrompt_WindowsAgentHasNoHeredocExample(t *testing.T) {
+	p := BuildSystemPrompt(
+		AgentConfig{Name: "Bot", OS: "windows amd64", WorkspacePath: `C:\ws`},
+		ChannelContext{TriggerType: TriggerChat}, "", nil,
+	)
+	// PowerShell has no <<'EOF' form, so the prompt must not offer one.
+	assertNotHas(t, p, "<<'EOF'")
+	assertHas(t, p, "```powershell")
+	assertHas(t, p, "@'")
+	// The encoding bootstrap keeps non-ASCII bodies intact through a native pipe.
+	assertHas(t, p, "$OutputEncoding = New-Object System.Text.UTF8Encoding($false)")
+}
+
+func TestBuildSystemPrompt_POSIXAgentKeepsBash(t *testing.T) {
+	p := BuildSystemPrompt(
+		AgentConfig{Name: "Bot", OS: "darwin arm64", WorkspacePath: "/tmp/ws"},
+		ChannelContext{TriggerType: TriggerChat}, "", nil,
+	)
+	assertHas(t, p, "Run one command per tool call, via Bash")
+	assertHas(t, p, "a heredoc")
+	assertHas(t, p, "'"+filepath.Join("/tmp/ws", "solo")+"' message send")
+	assertNotHas(t, p, "solo.exe")
+	assertHas(t, p, "cat /tmp/ws/RELATIONSHIPS.md")
+	assertNotHas(t, p, "PowerShell")
+}
+
+func TestIsWindowsAgentFallsBackToBuilderPlatform(t *testing.T) {
+	// An unset OS cannot be attributed to the Agent (it may be remote), so the
+	// builder's own platform is the only usable signal.
+	if got, want := isWindowsAgent(AgentConfig{}), runtime.GOOS == "windows"; got != want {
+		t.Fatalf("isWindowsAgent(no OS) = %v, want %v", got, want)
+	}
+	if !isWindowsAgent(AgentConfig{OS: "windows amd64"}) {
+		t.Fatal("windows OS must be detected")
+	}
+	if isWindowsAgent(AgentConfig{OS: "linux amd64"}) {
+		t.Fatal("linux OS must not be treated as windows")
+	}
 }
 
 func assertHas(t *testing.T, s, substr string) {
