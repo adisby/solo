@@ -142,6 +142,9 @@ func TestCLINoArgs(t *testing.T) {
 func TestCLINoToken(t *testing.T) {
 	t.Setenv("SOLO_AUTH_TOKEN", "")
 	t.Setenv("SOLO_TOKEN", "")
+	// Without a Daemon proxy the token is the only route to the Server, so the
+	// CLI must refuse before it touches anything.
+	t.Setenv("SOLO_DAEMON_URL", "")
 
 	code, stdout, stderr := captureAndRun(t, func() {
 		doExit(runCLI([]string{"task", "list"}))
@@ -157,6 +160,76 @@ func TestCLINoToken(t *testing.T) {
 	}
 	if stdout != "" {
 		t.Errorf("expected empty stdout, got %q", stdout)
+	}
+}
+
+func TestCLINoTokenStillUsesDaemonProxy(t *testing.T) {
+	t.Setenv("SOLO_AUTH_TOKEN", "")
+	t.Setenv("SOLO_TOKEN", "")
+	t.Setenv("SOLO_AGENT_ID", "agent-1")
+
+	type proxyCall struct {
+		path string
+		body string
+	}
+	calls := make(chan proxyCall, 1)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		select {
+		case calls <- proxyCall{path: r.URL.Path, body: string(raw)}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer proxy.Close()
+	t.Setenv("SOLO_DAEMON_URL", proxy.URL)
+
+	code, stdout, stderr := captureAndRun(t, func() {
+		doExit(runCLI([]string{"template", "list"}))
+	})
+	if strings.Contains(stderr, "SOLO_AUTH_TOKEN is missing") {
+		t.Fatalf("a tokenless proxied command was blocked at the auth gate: %q", stderr)
+	}
+	var call proxyCall
+	select {
+	case call = <-calls:
+	default:
+		t.Fatalf("the tokenless command never reached the Daemon proxy (stderr=%q)", stderr)
+	}
+	if call.path != "/internal/daemon/proxy" {
+		t.Fatalf("proxy path = %q, want /internal/daemon/proxy", call.path)
+	}
+	if !strings.Contains(call.body, `"action":"template_list"`) || !strings.Contains(call.body, `"agent_id":"agent-1"`) {
+		t.Fatalf("proxy body = %q; want the action and the agent identity", call.body)
+	}
+	// The Daemon authenticates the call against the active Run; the proxy body
+	// must not smuggle a credential.
+	if strings.Contains(call.body, "token") {
+		t.Fatalf("proxy body carries a credential: %q", call.body)
+	}
+	if code != 0 || stdout != "" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestCLIDirectCommandWithoutTokenFailsLocally(t *testing.T) {
+	t.Setenv("SOLO_AUTH_TOKEN", "")
+	t.Setenv("SOLO_TOKEN", "")
+	// A proxy is configured, so the gate lets the command through, but `task
+	// list` talks to the Server directly. It must report the missing credential
+	// instead of sending an unauthenticated request.
+	t.Setenv("SOLO_DAEMON_URL", "http://127.0.0.1:9")
+	t.Setenv("SOLO_API_URL", "http://127.0.0.1:9")
+
+	code, _, stderr := captureAndRun(t, func() {
+		doExit(runCLI([]string{"task", "list"}))
+	})
+	if !strings.Contains(stderr, "SOLO_AUTH_TOKEN is missing") {
+		t.Fatalf("expected the missing-token message, got %q", stderr)
+	}
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d (%q)", code, stderr)
 	}
 }
 

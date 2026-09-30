@@ -32,6 +32,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -88,7 +89,14 @@ func runCLI(args []string) int {
 	if token == "" {
 		token = os.Getenv("SOLO_TOKEN")
 	}
-	if token == "" {
+	// A command that runs through the Daemon proxy authenticates against its
+	// active Run, and the proxy request carries no token at all (see
+	// proxyRequestBody). Demanding the variable before every command therefore
+	// killed Agents whose session was created without one, even though their
+	// whole route needed nothing from them. A missing token stays fatal when this
+	// CLI has to reach the Server itself, and doHTTP refuses to send an
+	// unauthenticated request with the same message.
+	if token == "" && !daemonProxyConfigured() {
 		fmt.Fprintln(os.Stderr, "solo: error: authentication failed -- SOLO_AUTH_TOKEN is missing or expired")
 		return exitUsage
 	}
@@ -551,8 +559,16 @@ func proxyRequestBody(body map[string]interface{}) (int, []byte, error) {
 	return resp.StatusCode, respBody, nil
 }
 
+// daemonProxyConfigured reports whether a Daemon proxy is available to carry a
+// command. When it is, the command needs no client token: the proxy body carries
+// only identity and routing fields, and the Daemon authenticates the call
+// against the active Run.
+func daemonProxyConfigured() bool {
+	return strings.TrimSpace(os.Getenv("SOLO_DAEMON_URL")) != ""
+}
+
 func allowDirectFallback() bool {
-	return strings.TrimSpace(os.Getenv("SOLO_DAEMON_URL")) == ""
+	return !daemonProxyConfigured()
 }
 
 func handleTask(args []string, baseURL, token string) {
@@ -1404,6 +1420,12 @@ func proxyRequestTimeout(action string) time.Duration {
 }
 
 func doHTTPWithTimeout(method, url, token string, reqBody []byte, timeout time.Duration) (int, []byte, error) {
+	// A direct Server call carries the caller's credential. An empty token would
+	// leave as `Bearer ` and come back as a 401, so fail here with the message the
+	// missing variable deserves instead of spending a round trip on it.
+	if strings.TrimSpace(token) == "" {
+		return 0, nil, errors.New("authentication failed -- SOLO_AUTH_TOKEN is missing or expired")
+	}
 	var bodyReader io.Reader
 	if reqBody != nil {
 		bodyReader = bytes.NewReader(reqBody)
