@@ -6,6 +6,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: solo-postgres
+    # Come back automatically after a reboot or a Docker Desktop restart.
+    # `unless-stopped` (rather than `always`) keeps an explicit
+    # `docker compose stop` authoritative.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: solo
       POSTGRES_USER: solo
