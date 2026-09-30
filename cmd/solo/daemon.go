@@ -166,7 +166,9 @@ func daemonBinary() (string, error) {
 			return candidate, nil
 		}
 	}
-	path, err := exec.LookPath("solo-daemon")
+	// Resolve the platform's executable name explicitly rather than relying on
+	// PATHEXT expansion, so the lookup matches the sibling-file probe above.
+	path, err := exec.LookPath(daemonExecutableName("solo-daemon"))
 	if err != nil {
 		return "", errors.New("solo-daemon is not installed next to solo or on PATH")
 	}

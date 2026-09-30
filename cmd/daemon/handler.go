@@ -1328,12 +1328,17 @@ func (h *daemonHandler) processTaskWithBackend(ctx context.Context, req runTaskR
 	}
 	// Inject the companion solo CLI into the workspace so agents can send
 	// visible messages through the daemon proxy. Development uses .pids/solo;
-	// packaged installs keep it beside the daemon.
+	// packaged installs keep it beside the daemon. The destination name carries
+	// the platform's executable extension — on Windows an extensionless copy is
+	// not runnable, so injecting `solo` there would leave the Agent unable to
+	// run the very CLI the system prompt tells it to use.
 	soloPath := resolveSoloBinary()
 	if soloPath != "" {
-		soloDest := filepath.Join(ws.WorkDir, "solo")
+		soloDest := filepath.Join(ws.WorkDir, soloWorkspaceFileName())
 		if copyErr := copyFile(soloPath, soloDest, 0755); copyErr != nil {
-			slog.Warn("task: failed to copy solo binary to workspace", "solo_path", soloPath, "error", copyErr)
+			slog.Warn("task: failed to copy solo binary to workspace", "solo_path", soloPath, "solo_dest", soloDest, "error", copyErr)
+		} else {
+			removeStaleSoloWorkspaceCopy(ws.WorkDir)
 		}
 	} else {
 		slog.Warn("task: solo binary not found — agents cannot use solo CLI")
@@ -2135,26 +2140,89 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return err
 }
 
+// soloBinaryFileNames returns the file names the Solo CLI can have on this
+// platform, most specific first.
+//
+// On Windows the executable is always `solo.exe`: a bare `solo` is not runnable
+// there, and os.Stat does not apply PATHEXT, so a lookup that only tries the
+// extensionless name fails even when the binary sits right next to the daemon.
+// That failure is silent — the Agent simply never receives the CLI — so both
+// names are probed on every path candidate.
+func soloBinaryFileNames() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"solo.exe", "solo"}
+	}
+	return []string{"solo"}
+}
+
+// soloWorkspaceFileName is the name the CLI is injected under inside an Agent
+// workspace. Windows needs the extension for the file to be executable at all.
+func soloWorkspaceFileName() string {
+	if runtime.GOOS == "windows" {
+		return "solo.exe"
+	}
+	return "solo"
+}
+
+// removeStaleSoloWorkspaceCopy deletes an extensionless `solo` left in the
+// workspace by an older daemon build. Windows cannot run that file, and leaving
+// it in place invites an Agent to try it and read the failure as a broken
+// environment. Removal is best effort: a stale file is untidy, not fatal.
+func removeStaleSoloWorkspaceCopy(workDir string) {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	stale := filepath.Join(workDir, "solo")
+	if _, err := os.Stat(stale); err != nil {
+		return
+	}
+	if err := os.Remove(stale); err != nil {
+		slog.Debug("task: could not remove stale workspace solo copy", "path", stale, "error", err)
+	}
+}
+
+// isRunnableSoloBinary reports whether path is a regular file this platform can
+// execute. On Windows there is no execute bit: os.Stat reports 0666 for a normal
+// file and 0444 only for a read-only one, so requiring 0111 would reject every
+// installed CLI. There, a regular file is treated as runnable.
+func isRunnableSoloBinary(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
 func resolveSoloBinary() string {
-	candidates := make([]string, 0, 5)
+	candidates := make([]string, 0, 8)
 	if configured := strings.TrimSpace(os.Getenv("SOLO_CLI_BIN")); configured != "" {
 		candidates = append(candidates, configured)
 	}
 	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "solo"))
+		// Packaged installs keep the CLI beside the daemon.
+		for _, name := range soloBinaryFileNames() {
+			candidates = append(candidates, filepath.Join(filepath.Dir(exe), name))
+		}
 	}
 	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(wd, ".pids", "solo"),
-			filepath.Join(wd, "bin", "solo"),
-		)
+		// Development builds keep it in the repo's pid directory.
+		for _, name := range soloBinaryFileNames() {
+			candidates = append(candidates,
+				filepath.Join(wd, ".pids", name),
+				filepath.Join(wd, "bin", name),
+			)
+		}
 	}
-	if path, err := exec.LookPath("solo"); err == nil {
-		candidates = append(candidates, path)
+	for _, name := range soloBinaryFileNames() {
+		if path, err := exec.LookPath(name); err == nil {
+			candidates = append(candidates, path)
+		}
 	}
 	for _, candidate := range candidates {
-		info, err := os.Stat(candidate)
-		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+		if isRunnableSoloBinary(candidate) {
 			return candidate
 		}
 	}

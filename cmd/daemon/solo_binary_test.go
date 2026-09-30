@@ -3,8 +3,76 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// TestSoloBinaryFileNamesCoverPlatformExecutable pins the Windows regression
+// that made every task log "solo binary not found" while the CLI sat next to the
+// daemon: the lookup only tried the extensionless name, which os.Stat cannot
+// resolve to solo.exe.
+func TestSoloBinaryFileNamesCoverPlatformExecutable(t *testing.T) {
+	names := soloBinaryFileNames()
+	if len(names) == 0 {
+		t.Fatal("expected at least one candidate file name")
+	}
+	if runtime.GOOS != "windows" {
+		if names[0] != "solo" {
+			t.Fatalf("first candidate = %q, want solo", names[0])
+		}
+		return
+	}
+	if names[0] != "solo.exe" {
+		t.Fatalf("first candidate = %q, want solo.exe (the only runnable name on Windows)", names[0])
+	}
+	if names[len(names)-1] != "solo" {
+		t.Fatalf("last candidate = %q, want the extensionless fallback", names[len(names)-1])
+	}
+}
+
+// TestSoloWorkspaceFileNameMatchesPlatformExecutable pins the other half of the
+// Windows bug: even a resolved CLI was copied into the workspace without an
+// extension, where Windows refuses to run it.
+func TestSoloWorkspaceFileNameMatchesPlatformExecutable(t *testing.T) {
+	want := "solo"
+	if runtime.GOOS == "windows" {
+		want = "solo.exe"
+	}
+	if got := soloWorkspaceFileName(); got != want {
+		t.Fatalf("soloWorkspaceFileName() = %q, want %q", got, want)
+	}
+}
+
+// TestRemoveStaleSoloWorkspaceCopyClearsExtensionlessLeftover covers upgrading a
+// workspace that an older daemon populated with the unrunnable extensionless copy.
+func TestRemoveStaleSoloWorkspaceCopyClearsExtensionlessLeftover(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "solo")
+	if err := os.WriteFile(stale, []byte("stale"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(dir, soloWorkspaceFileName())
+	if err := os.WriteFile(current, []byte("current"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	removeStaleSoloWorkspaceCopy(dir)
+
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("the current copy must survive: %v", err)
+	}
+	_, err := os.Stat(stale)
+	if runtime.GOOS == "windows" {
+		if !os.IsNotExist(err) {
+			t.Fatalf("stale extensionless copy should be removed on Windows, stat err = %v", err)
+		}
+		return
+	}
+	// On POSIX the extensionless name IS the injected copy, so it must remain.
+	if err != nil {
+		t.Fatalf("POSIX copy must survive: %v", err)
+	}
+}
 
 func TestResolveSoloBinaryUsesConfiguredExecutable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "solo")
