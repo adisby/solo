@@ -80,6 +80,7 @@ docs/design/*
 !docs/design/agent-team-compounding-gap-and-rollout.md
 !docs/design/agent-team-compounding-design-notes.md
 !docs/design/solo-ux-convergence.md
+!docs/design/dsh-acp-backend.md
 !docs/acceptance/
 !docs/acceptance/**
 !docs/acceptance/**/*.png
