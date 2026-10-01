@@ -20,8 +20,8 @@ func newFakeDshAcpBackend(t *testing.T) *DshAcpBackend {
 	return backend
 }
 
-// readFakeDshAcpTurn drains one turn's chunks and returns its result.
-func readFakeDshAcpTurn(t *testing.T, ps *PersistentSession) ([]OutputChunk, *Result) {
+// readDshAcpTurn drains one turn's chunks and returns its result.
+func readDshAcpTurn(t *testing.T, ps *PersistentSession) ([]OutputChunk, *Result) {
 	t.Helper()
 	var chunks []OutputChunk
 	for chunk := range ps.Messages {
@@ -77,7 +77,7 @@ func TestDshAcpBackendStartStreamsTurnAndReportsUsage(t *testing.T) {
 		t.Fatalf("workspace instructions = %q (err %v), want the system prompt", instructions, err)
 	}
 
-	chunks, result := readFakeDshAcpTurn(t, ps)
+	chunks, result := readDshAcpTurn(t, ps)
 	if result.Status != "completed" || result.Error != "" {
 		t.Fatalf("result = %+v, want a completed turn", result)
 	}
@@ -126,7 +126,7 @@ func TestDshAcpBackendResumesTheStoredSessionAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	if _, result := readFakeDshAcpTurn(t, first); result.Status != "completed" {
+	if _, result := readDshAcpTurn(t, first); result.Status != "completed" {
 		t.Fatalf("first result = %+v, want completed", result)
 	}
 	firstSession := first.SessionID
@@ -145,7 +145,7 @@ func TestDshAcpBackendResumesTheStoredSessionAcrossProcesses(t *testing.T) {
 	if second.SessionID != firstSession {
 		t.Fatalf("SessionID = %q, want the restored %q", second.SessionID, firstSession)
 	}
-	if _, result := readFakeDshAcpTurn(t, second); result.Status != "completed" {
+	if _, result := readDshAcpTurn(t, second); result.Status != "completed" {
 		t.Fatalf("second result = %+v, want completed", result)
 	}
 
@@ -170,7 +170,7 @@ func TestDshAcpBackendFallsBackToANewSessionWhenResumeFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
-	if _, result := readFakeDshAcpTurn(t, first); result.Status != "completed" {
+	if _, result := readDshAcpTurn(t, first); result.Status != "completed" {
 		t.Fatalf("first result = %+v, want completed", result)
 	}
 	_ = backend.Close(first)
@@ -189,7 +189,7 @@ func TestDshAcpBackendFallsBackToANewSessionWhenResumeFails(t *testing.T) {
 	if second.SessionID == first.SessionID {
 		t.Fatalf("SessionID = %q, want a fresh session after the rejected resume", second.SessionID)
 	}
-	if _, result := readFakeDshAcpTurn(t, second); result.Status != "completed" {
+	if _, result := readDshAcpTurn(t, second); result.Status != "completed" {
 		t.Fatalf("second result = %+v, want a turn that still completed", result)
 	}
 	record := readFakeDshAcpRecord(statePath)
@@ -240,7 +240,7 @@ func TestDshAcpBackendAppliesModelAndEffort(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer backend.Close(ps)
-	chunks, result := readFakeDshAcpTurn(t, ps)
+	chunks, result := readDshAcpTurn(t, ps)
 	if result.Status != "completed" {
 		t.Fatalf("result = %+v, want completed", result)
 	}
@@ -298,7 +298,7 @@ func TestDshAcpBackendStopCancelsTheTurnAndKeepsTheSession(t *testing.T) {
 	if err := ps.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, result := readFakeDshAcpTurn(t, ps); result.Status != "cancelled" {
+	if _, result := readDshAcpTurn(t, ps); result.Status != "cancelled" {
 		t.Fatalf("result = %+v, want a cancelled turn", result)
 	}
 
@@ -318,7 +318,7 @@ func TestDshAcpBackendStopCancelsTheTurnAndKeepsTheSession(t *testing.T) {
 	if next.SessionID != ps.SessionID {
 		t.Fatalf("SessionID = %q, want the same session %q", next.SessionID, ps.SessionID)
 	}
-	if _, result := readFakeDshAcpTurn(t, next); result.Status != "completed" {
+	if _, result := readDshAcpTurn(t, next); result.Status != "completed" {
 		t.Fatalf("second result = %+v, want completed", result)
 	}
 	record := readFakeDshAcpRecord(statePath)

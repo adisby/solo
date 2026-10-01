@@ -253,5 +253,16 @@ Remaining phases and their entry points:
 Carried-forward unknowns:
 
 - Permission option ids are read from the request (`allow_always`, then `allow_once`, then a permit-named option). DSH advertises `allow-once` / `reject-once` and treats every other answer as a rejection, which the phase-1 selection satisfies; it is unit-tested but not yet exercised against a live approval.
-- `session/cancel` is wired through the client helper; no backend calls it yet, so the live cancel path belongs to phase 2.
-- Phases 2 to 6 have no code yet; no `dsh_acp` backend exists.
+- `session/cancel` is wired through the client helper and the ACP backend's Stop; the live cancel path runs in the fixture only, not yet against a real approval or interruption.
+- Phases 4 to 7 have no code yet.
+
+Running the phase-3 acceptance:
+
+```sh
+SOLO_E2E_DSH=1 \
+DSH_BIN=/path/to/dsh/lib/bin.js \
+DSH_HOME=/path/to/harness-home \
+go test ./pkg/agent/ -run TestDshAcpE2EResumesOneSessionAcrossProcesses -v
+```
+
+The DSH install must return turn usage from `session/prompt`; set `SOLO_E2E_DSH_ALLOW_NO_USAGE=1` for one that does not. A Harness home reached through a Windows drive mount can fail the credentials file's owner-only check, so point `DSH_HOME` at a filesystem that reports real modes.
