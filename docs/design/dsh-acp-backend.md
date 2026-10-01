@@ -230,7 +230,10 @@ Decisions taken: token usage follows option A, ACP ships opt-in first (`SOLO_DSH
 Delivered before this handoff:
 
 - Decision A is implemented upstream, tested, documented, and exercised against a live ACP turn: a settled `session/prompt` returns `usage`. It sits on branch `feat/acp-prompt-turn-usage` in the Harness checkout, so a Solo run against stock DSH still receives no usage until that change ships.
-- Phase 0 (ACP profile, overlay, resume and cancel verification) and phase 1 (shared ACP client helpers) are complete.
+- Phases 0 and 1: the ACP profile, overlay, resume, cancel and permission verification, and the shared ACP client helpers.
+- Phase 2: the ACP transport itself, its fixture runtime, the shared provider-turn contract row, the capability table, and the `SOLO_DSH_PROTOCOL` switch.
+- Phase 3: the real-DSH end-to-end test that resumes one session across two processes with a single durable artifact.
+- Phase 4: migration `000080_retire_dsh_sdk_sessions`, plus a throwaway-database test that applies the shipped migrations around it and a dispatch test that pins a retired session cold-starting.
 
 Prerequisites for the remaining phases:
 
@@ -243,12 +246,9 @@ Prerequisites for the remaining phases:
 
 Remaining phases and their entry points:
 
-1. **Phase 2** — `pkg/agent/dsh_acp.go` behind `SOLO_DSH_PROTOCOL`; a Go ACP fixture runtime in `pkg/agent/dsh_acp_helper_test.go` (the SDK fixture stays, because both transports coexist until phase 7); the `dsh` row in `TestStableACPPersistentProviderTurnContract`; the capability table in `pkg/agent/builtins.go`; and an optional `stopStatus` mapping so a cancelled turn reports `cancelled` instead of `completed` without changing the other ACP adapters.
-2. **Phase 3** — extend `pkg/agent/dsh_e2e_test.go` (`SOLO_E2E_DSH=1`) to prove cross-process resume and a single session artifact.
-3. **Phase 4** — the `agent_sessions` retirement migration and the dispatch tests against real PostgreSQL.
-4. **Phase 5** — overlay provisioning in the daemon and the `docs/dsh-backend.md` rewrite.
-5. **Phase 6** — `make rebuild`, then `make test-e2e-agent-session-resume` and `make test-e2e-agent-idle-resume` against a `dsh` agent.
-6. **Phase 7** — flip `SOLO_DSH_PROTOCOL` and delete the SDK backend.
+1. **Phase 5** — overlay provisioning in the daemon and the `docs/dsh-backend.md` rewrite.
+2. **Phase 6** — `make rebuild`, then `make test-e2e-agent-session-resume` and `make test-e2e-agent-idle-resume` against a `dsh` agent.
+3. **Phase 7** — flip `SOLO_DSH_PROTOCOL` and delete the SDK backend.
 
 Carried-forward unknowns:
 
