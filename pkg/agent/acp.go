@@ -383,17 +383,18 @@ func (c *acpClient) handleAgentRequest(raw map[string]json.RawMessage) {
 	var resp map[string]any
 	switch method {
 	case "session/request_permission":
+		optionID := acpPermissionOptionID(raw["params"])
 		resp = map[string]any{
 			"jsonrpc": "2.0",
 			"id":      json.RawMessage(rawID),
 			"result": map[string]any{
 				"outcome": map[string]any{
 					"outcome":  "selected",
-					"optionId": "approve_for_session",
+					"optionId": optionID,
 				},
 			},
 		}
-		c.logger.Debug("auto-approved agent permission request", "method", method)
+		c.logger.Debug("auto-approved agent permission request", "method", method, "option_id", optionID)
 	default:
 		resp = map[string]any{
 			"jsonrpc": "2.0",
@@ -913,6 +914,272 @@ func resolveResumedSessionID(requested string, response json.RawMessage) (string
 		return requested, false
 	}
 	return got, got != requested
+}
+
+// notify writes a JSON-RPC notification: a method call with no id and no
+// response. It is how a client asks the agent to act without awaiting a result.
+func (c *acpClient) notify(method string, params any) error {
+	data, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", method, err)
+	}
+	if err := c.writeLine(append(data, '\n')); err != nil {
+		return fmt.Errorf("write %s: %w", method, err)
+	}
+	return nil
+}
+
+// cancelSession asks the agent to stop the session's active turn. The process
+// and the session stay alive: the in-flight session/prompt settles with
+// stopReason "cancelled" and the session accepts later prompts.
+func (c *acpClient) cancelSession(sessionID string) error {
+	return c.notify("session/cancel", map[string]any{"sessionId": sessionID})
+}
+
+// resumeSession restores a persisted session for one workspace and returns its
+// identity and advertised configuration. The workspace belongs to the resume
+// identity: the agent verifies it before composing the restored session, so a
+// caller must pass the directory the session was created in. A response naming a
+// different session id adopts that id.
+func (c *acpClient) resumeSession(ctx context.Context, sessionID, cwd string) (string, acpSessionConfig, error) {
+	result, err := c.request(ctx, "session/resume", map[string]any{
+		"sessionId":  sessionID,
+		"cwd":        cwd,
+		"mcpServers": []any{},
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	resumed, _ := resolveResumedSessionID(sessionID, result)
+	return resumed, parseACPSessionConfig(result), nil
+}
+
+// acpAgentCapabilities is the capability block an agent advertises in its
+// initialize result. Each session capability is advertised as an object, so its
+// presence is the support statement.
+type acpAgentCapabilities struct {
+	Resume bool
+	Close  bool
+	List   bool
+	Image  bool
+}
+
+// initialize performs the ACP handshake and returns the agent's advertised
+// capabilities. A caller that must restore a persisted session reads
+// acpAgentCapabilities.Resume instead of assuming session/resume exists.
+func (c *acpClient) initialize(ctx context.Context) (acpAgentCapabilities, error) {
+	result, err := c.request(ctx, "initialize", map[string]any{
+		"protocolVersion": 1,
+		"clientInfo": map[string]any{
+			"name":    "solo-agent-sdk",
+			"version": "1.0.0",
+		},
+		"clientCapabilities": map[string]any{},
+	})
+	if err != nil {
+		return acpAgentCapabilities{}, err
+	}
+	return parseACPAgentCapabilities(result), nil
+}
+
+// parseACPAgentCapabilities reads the capability block of an initialize result.
+// A missing or malformed block advertises nothing.
+func parseACPAgentCapabilities(result json.RawMessage) acpAgentCapabilities {
+	var r struct {
+		AgentCapabilities struct {
+			SessionCapabilities struct {
+				Resume *json.RawMessage `json:"resume"`
+				Close  *json.RawMessage `json:"close"`
+				List   *json.RawMessage `json:"list"`
+			} `json:"sessionCapabilities"`
+			PromptCapabilities struct {
+				Image bool `json:"image"`
+			} `json:"promptCapabilities"`
+		} `json:"agentCapabilities"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return acpAgentCapabilities{}
+	}
+	return acpAgentCapabilities{
+		Resume: acpCapabilityPresent(r.AgentCapabilities.SessionCapabilities.Resume),
+		Close:  acpCapabilityPresent(r.AgentCapabilities.SessionCapabilities.Close),
+		List:   acpCapabilityPresent(r.AgentCapabilities.SessionCapabilities.List),
+		Image:  r.AgentCapabilities.PromptCapabilities.Image,
+	}
+}
+
+// acpCapabilityPresent reports whether an advertised capability is a value
+// rather than a missing or null field.
+func acpCapabilityPresent(raw *json.RawMessage) bool {
+	return raw != nil && string(*raw) != "null"
+}
+
+// acpConfigOption is one session configuration choice advertised by session/new,
+// session/resume, or session/set_config_option. Its values are opaque to the
+// client: the agent owns their encoding, and DSH encodes the model option as a
+// JSON ["provider","model"] pair.
+type acpConfigOption struct {
+	ID           string           `json:"id"`
+	Name         string           `json:"name"`
+	Category     string           `json:"category"`
+	Type         string           `json:"type"`
+	CurrentValue string           `json:"currentValue"`
+	Options      []acpConfigValue `json:"options"`
+}
+
+// acpConfigValue is one selectable value of an acpConfigOption.
+type acpConfigValue struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// acpSessionConfig is a session's advertised configuration state by option id.
+type acpSessionConfig map[string]acpConfigOption
+
+// acpModelConfigID and acpEffortConfigID are the standard configuration option
+// ids ACP defines for the model and the reasoning effort.
+const (
+	acpModelConfigID  = "model"
+	acpEffortConfigID = "reasoning_effort"
+)
+
+// acpModelPair is an opaque model option value decoded as a provider/model pair.
+type acpModelPair struct {
+	provider string
+	model    string
+}
+
+// parseACPSessionConfig reads the configOptions field carried by every session
+// lifecycle result. A result without that field yields an empty configuration.
+func parseACPSessionConfig(result json.RawMessage) acpSessionConfig {
+	var r struct {
+		ConfigOptions []acpConfigOption `json:"configOptions"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return acpSessionConfig{}
+	}
+	cfg := make(acpSessionConfig, len(r.ConfigOptions))
+	for _, option := range r.ConfigOptions {
+		cfg[option.ID] = option
+	}
+	return cfg
+}
+
+// modelValue resolves a requested model to the exact value the session
+// advertised. It matches the model element of an opaque JSON pair such as DSH's
+// ["provider","model"], an advertised display name, or an exact value;
+// "provider/model" pins the provider and therefore requires a pair match.
+func (cfg acpSessionConfig) modelValue(model string) (string, bool) {
+	option, ok := cfg[acpModelConfigID]
+	if !ok || model == "" {
+		return "", false
+	}
+	provider, id := "", model
+	if slash := strings.IndexByte(model, '/'); slash >= 0 {
+		provider, id = model[:slash], model[slash+1:]
+	}
+	matchesPair := func(value string) bool {
+		pair, ok := decodeACPModelPair(value)
+		return ok && pair.model == id && (provider == "" || pair.provider == provider)
+	}
+	for _, candidate := range option.Options {
+		if matchesPair(candidate.Value) {
+			return candidate.Value, true
+		}
+		// A display name or literal value cannot pin a provider, so a
+		// provider-qualified request accepts only the pair match above.
+		if provider == "" && (candidate.Name == id || candidate.Value == model) {
+			return candidate.Value, true
+		}
+	}
+	if option.CurrentValue != "" && matchesPair(option.CurrentValue) {
+		return option.CurrentValue, true
+	}
+	return "", false
+}
+
+// effortValue resolves a requested reasoning effort to the exact value the
+// session advertised, matching the value first and the display name second, so
+// both "high" and "High" resolve.
+func (cfg acpSessionConfig) effortValue(effort string) (string, bool) {
+	option, ok := cfg[acpEffortConfigID]
+	if !ok || effort == "" {
+		return "", false
+	}
+	for _, candidate := range option.Options {
+		if candidate.Value == effort || strings.EqualFold(candidate.Name, effort) {
+			return candidate.Value, true
+		}
+	}
+	return "", false
+}
+
+// decodeACPModelPair decodes an opaque model value as a provider/model pair.
+func decodeACPModelPair(value string) (acpModelPair, bool) {
+	var parts []string
+	if err := json.Unmarshal([]byte(value), &parts); err != nil || len(parts) != 2 {
+		return acpModelPair{}, false
+	}
+	return acpModelPair{provider: parts[0], model: parts[1]}, true
+}
+
+// setConfigOption applies one advertised session configuration option and
+// returns the complete resulting state. An unknown id or value is the agent's
+// to reject, and its message travels back in the error.
+func (c *acpClient) setConfigOption(ctx context.Context, sessionID, configID, value string) (acpSessionConfig, error) {
+	result, err := c.request(ctx, "session/set_config_option", map[string]any{
+		"sessionId": sessionID,
+		"configId":  configID,
+		"value":     value,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseACPSessionConfig(result), nil
+}
+
+// acpPermissionOptionID chooses the option that grants the requested tool call.
+// Agents advertise their own option ids, so selection reads the request: a
+// session-wide permit wins, then a one-shot permit, then any option whose id or
+// name marks a permit. The unattended Daemon never escalates to a human, so the
+// fallback keeps the id older DSH releases accept.
+func acpPermissionOptionID(params json.RawMessage) string {
+	const fallback = "approve_for_session"
+	var req struct {
+		Options []struct {
+			OptionID string `json:"optionId"`
+			Name     string `json:"name"`
+			Kind     string `json:"kind"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		return fallback
+	}
+	for _, option := range req.Options {
+		if option.Kind == "allow_always" && option.OptionID != "" {
+			return option.OptionID
+		}
+	}
+	for _, option := range req.Options {
+		if option.Kind == "allow_once" && option.OptionID != "" {
+			return option.OptionID
+		}
+	}
+	for _, option := range req.Options {
+		if option.OptionID == "" {
+			continue
+		}
+		lowered := strings.ToLower(option.OptionID + " " + option.Name)
+		if strings.Contains(lowered, "allow") || strings.Contains(lowered, "approve") {
+			return option.OptionID
+		}
+	}
+	return fallback
 }
 
 // buildACPUsageMap returns a usage map keyed by the given model, or nil if
