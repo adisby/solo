@@ -387,12 +387,17 @@ func TestDshMetaFollowsTheSelectedProtocol(t *testing.T) {
 		t.Fatalf("factory returned %T, want the ACP transport when selected", backend)
 	}
 
-	t.Setenv("SOLO_DSH_PROTOCOL", "")
-	backend, err = dshFactory(BackendConfig{})
-	if err != nil {
-		t.Fatalf("dshFactory: %v", err)
-	}
-	if _, ok := backend.(*DshBackend); !ok {
-		t.Fatalf("factory returned %T, want the SDK transport by default", backend)
+	// ACP is the default now: an unset variable and an unrecognised value both
+	// select it, so a typo cannot silently fall back to the legacy transport.
+	for _, value := range []string{"", "acp", "AcP", "something-else"} {
+		t.Setenv("SOLO_DSH_PROTOCOL", value)
+		backend, err = dshFactory(BackendConfig{})
+		if err != nil {
+			t.Fatalf("dshFactory(SOLO_DSH_PROTOCOL=%q): %v", value, err)
+		}
+		if _, ok := backend.(*DshAcpBackend); !ok {
+			t.Fatalf("factory returned %T with SOLO_DSH_PROTOCOL=%q, want the ACP transport",
+				backend, value)
+		}
 	}
 }

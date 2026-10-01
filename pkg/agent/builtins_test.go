@@ -66,9 +66,22 @@ func TestBuiltins_ListMeta(t *testing.T) {
 }
 
 func TestBuiltinsCapabilitiesAreCompleteAndMatchPersistentInterface(t *testing.T) {
+	// An adapter states support explicitly: the zero value normalizes to unknown,
+	// so accepting unknown everywhere would hide a capability nobody filled in.
 	valid := map[CapabilityStatus]bool{
 		CapabilitySupported:   true,
 		CapabilityUnsupported: true,
+	}
+	// token_usage is the exception. Whether a provider reports usage depends on
+	// the build running behind the adapter, not on Solo's integration with it —
+	// the dsh ACP transport reads usage when DSH emits it and reports unknown
+	// while it does not.
+	validFor := map[string]map[CapabilityStatus]bool{
+		"token_usage": {
+			CapabilitySupported:   true,
+			CapabilityUnsupported: true,
+			CapabilityUnknown:     true,
+		},
 	}
 	for _, meta := range GlobalRegistry().ListMeta() {
 		statuses := map[string]CapabilityStatus{
@@ -80,7 +93,11 @@ func TestBuiltinsCapabilitiesAreCompleteAndMatchPersistentInterface(t *testing.T
 			"token_usage":             meta.Capabilities.TokenUsage,
 		}
 		for name, status := range statuses {
-			if !valid[status] {
+			allowed := valid
+			if specific, ok := validFor[name]; ok {
+				allowed = specific
+			}
+			if !allowed[status] {
 				t.Errorf("%s capability %s = %q, want an explicit supported/unsupported value", meta.Type, name, status)
 			}
 		}

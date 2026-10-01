@@ -158,13 +158,14 @@ func init() {
 	r.RegisterWithScriptResolver(dshMeta(), dshFactory, resolveScriptCommand)
 }
 
-// dshProtocol names the transport the dsh adapter speaks. ACP is opt-in until it
-// becomes the default; any other value keeps the SDK JSON-RPC runtime.
+// dshProtocol names the transport the dsh adapter speaks. ACP is the default;
+// SOLO_DSH_PROTOCOL=sdk selects the SDK JSON-RPC runtime, which stays shipped
+// until the ACP transport has run in production.
 func dshProtocol() string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("SOLO_DSH_PROTOCOL")), "acp") {
-		return "acp"
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SOLO_DSH_PROTOCOL")), "sdk") {
+		return "sdk"
 	}
-	return "sdk"
+	return "acp"
 }
 
 // dshMeta describes the dsh adapter for the selected transport.
