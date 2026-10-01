@@ -28,6 +28,7 @@ import {
   Trash2,
   RefreshCw,
   Unplug,
+  UserPlus,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { t } from '@/lib/i18n';
@@ -111,7 +112,7 @@ export default function ComputersPage() {
   const searchParams = useSearchParams();
   const onboardingActive = searchParams.has('onboarding');
   const { isAuthenticated, isLoading: authLoading } = useAuth();
-  const { computers, isLoading, error, addComputer, updateComputer, deleteComputer, createEnrollment, revokeCredential, refetch } = useComputers();
+  const { computers, isLoading, error, addComputer, updateComputer, deleteComputer, claimComputer, createEnrollment, revokeCredential, refetch } = useComputers();
   const { showToast } = useToast();
 
   // Inline edit state
@@ -384,6 +385,14 @@ export default function ComputersPage() {
                           onEditKeyDown={handleEditKeyDown}
                           onEditNameChange={setEditName}
                           onRevokeCredential={async (item) => { await revokeCredential(item.id); }}
+                          onClaimComputer={async (item) => {
+                            try {
+                              await claimComputer(item.id);
+                              showToast(t('computersClaimSuccess'), 'success');
+                            } catch (err) {
+                              showToast(err instanceof Error ? err.message : t('computersClaimFailed'), 'error');
+                            }
+                          }}
                           onDelete={(item) => {
                             setDeleteError(null);
                             setDeleteTarget(item);
@@ -487,6 +496,20 @@ export default function ComputersPage() {
 
 // ---- Computer Card component (extracted for clarity) ----
 
+// A local-compatibility Computer registers itself unclaimed (owner_id NULL, no
+// credential, hence "unpaired"), and the server only lets an owner or member
+// bind an Agent to a Computer — so creating an Agent on it otherwise fails with
+// "computer is unavailable" while the UI offers no way out. This mirrors the
+// preconditions ClaimComputer enforces: unowned, unpaired, and online.
+function canClaimComputer(computer: Computer): boolean {
+  return (
+    !computer.owner_id &&
+    !computer.my_role &&
+    computer.status === 'online' &&
+    computer.pairing_status === 'unpaired'
+  );
+}
+
 interface ComputerCardProps {
   computer: Computer;
   editingId: string | null;
@@ -499,6 +522,7 @@ interface ComputerCardProps {
   onEditKeyDown: (e: React.KeyboardEvent<HTMLInputElement>, id: string) => void;
   onEditNameChange: (name: string) => void;
   onRevokeCredential: (computer: Computer) => void;
+  onClaimComputer: (computer: Computer) => void;
   onDelete: (computer: Computer) => void;
 }
 
@@ -514,6 +538,7 @@ function ComputerCard({
   onEditKeyDown,
   onEditNameChange,
   onRevokeCredential,
+  onClaimComputer,
   onDelete,
 }: ComputerCardProps) {
   const isOnline = computer.status === 'online';
@@ -634,6 +659,12 @@ function ComputerCard({
               <InfoRow label={t('computersPairingStatus')}>
                 <div className="flex items-center gap-2">
                   <span className="font-mono text-xs">{computer.pairing_status}</span>
+                  {canClaimComputer(computer) && (
+                    <Button type="button" size="sm" onClick={() => onClaimComputer(computer)}>
+                      <UserPlus className="mr-1.5 h-4 w-4" />
+                      {t('computersClaim')}
+                    </Button>
+                  )}
                   {computer.my_role === 'owner' && isOnline && computer.pairing_status === 'paired' && (
                     <Button type="button" size="sm" variant="danger" onClick={() => onRevokeCredential(computer)}>
                       <Unplug className="mr-1.5 h-4 w-4" />
