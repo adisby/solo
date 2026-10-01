@@ -234,6 +234,7 @@ Delivered before this handoff:
 - Phase 2: the ACP transport itself, its fixture runtime, the shared provider-turn contract row, the capability table, and the `SOLO_DSH_PROTOCOL` switch.
 - Phase 3: the real-DSH end-to-end test that resumes one session across two processes with a single durable artifact.
 - Phase 4: migration `000080_retire_dsh_sdk_sessions`, plus a throwaway-database test that applies the shipped migrations around it and a dispatch test that pins a retired session cold-starting.
+- Phase 5: the ACP transport writes `$DSH_HOME/solo-acp-overlay.yml` before every launch (atomic, idempotent, refuses a foreign file, applied before `DSH_PATCH`), and `docs/dsh-backend.md` documents both transports.
 
 Prerequisites for the remaining phases:
 
@@ -246,9 +247,8 @@ Prerequisites for the remaining phases:
 
 Remaining phases and their entry points:
 
-1. **Phase 5** — overlay provisioning in the daemon and the `docs/dsh-backend.md` rewrite.
-2. **Phase 6** — `make rebuild`, then `make test-e2e-agent-session-resume` and `make test-e2e-agent-idle-resume` against a `dsh` agent.
-3. **Phase 7** — flip `SOLO_DSH_PROTOCOL` and delete the SDK backend.
+1. **Phase 6** — `make rebuild`, then `make test-e2e-agent-session-resume` and `make test-e2e-agent-idle-resume` against a `dsh` agent.
+2. **Phase 7** — flip `SOLO_DSH_PROTOCOL` and delete the SDK backend.
 
 Carried-forward unknowns:
 

@@ -11,6 +11,33 @@ import (
 	"time"
 )
 
+// dshAcpE2EInstructionMarker is the codeword the instruction check asks the model
+// to answer with, proving the managed overlay made DSH load the workspace
+// instructions file.
+const dshAcpE2EInstructionMarker = "OVERLAY-LOADED"
+
+// dshAcpE2ETarget resolves the real DSH launcher and Harness home both
+// end-to-end tests need, skipping unless they are explicitly enabled.
+func dshAcpE2ETarget(t *testing.T) (bin, home string) {
+	t.Helper()
+	if os.Getenv("SOLO_E2E_DSH") != "1" {
+		t.Skip("set SOLO_E2E_DSH=1 to run the real DSH ACP end-to-end tests")
+	}
+	bin = strings.TrimSpace(os.Getenv("DSH_BIN"))
+	if bin == "" {
+		t.Fatal("DSH_BIN must point at the dsh launcher for these tests")
+	}
+	home = strings.TrimSpace(os.Getenv("DSH_HOME"))
+	if home == "" {
+		resolved, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatalf("resolve the Harness home: %v", err)
+		}
+		home = filepath.Join(resolved, ".dsh")
+	}
+	return bin, home
+}
+
 // TestDshAcpE2EResumesOneSessionAcrossProcesses drives a real `dsh --profile acp`
 // process over the ACP transport and proves the regression that transport exists
 // to fix: a second process restores the stored session instead of creating
@@ -26,21 +53,7 @@ import (
 // SOLO_E2E_DSH_ALLOW_NO_USAGE=1 relaxes the usage assertion for a DSH build that
 // does not report it yet.
 func TestDshAcpE2EResumesOneSessionAcrossProcesses(t *testing.T) {
-	if os.Getenv("SOLO_E2E_DSH") != "1" {
-		t.Skip("set SOLO_E2E_DSH=1 to run the real DSH ACP end-to-end test")
-	}
-	bin := strings.TrimSpace(os.Getenv("DSH_BIN"))
-	if bin == "" {
-		t.Fatal("DSH_BIN must point at the dsh launcher for this test")
-	}
-	home := strings.TrimSpace(os.Getenv("DSH_HOME"))
-	if home == "" {
-		resolved, err := os.UserHomeDir()
-		if err != nil {
-			t.Fatalf("resolve the Harness home: %v", err)
-		}
-		home = filepath.Join(resolved, ".dsh")
-	}
+	bin, home := dshAcpE2ETarget(t)
 	expectUsage := os.Getenv("SOLO_E2E_DSH_ALLOW_NO_USAGE") != "1"
 
 	backend := NewDshAcpBackend(bin, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -51,7 +64,7 @@ func TestDshAcpE2EResumesOneSessionAcrossProcesses(t *testing.T) {
 	first, err := backend.Start(ctx, &ExecuteRequest{
 		AgentID:  "agent-e2e",
 		Messages: []Message{{Role: RoleUser, Content: "Reply with exactly: pong"}},
-	}, &ExecuteOptions{WorkspaceDir: workspace})
+	}, &ExecuteOptions{WorkspaceDir: workspace, SystemPrompt: dshAcpE2EInstructionMarker})
 	if err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
@@ -94,6 +107,43 @@ func TestDshAcpE2EResumesOneSessionAcrossProcesses(t *testing.T) {
 
 	if resumed := dshSessionArtifacts(t, home, firstSession); len(resumed) != 1 {
 		t.Fatalf("session artifacts after resume = %v, want the same single artifact", resumed)
+	}
+}
+
+// TestDshAcpE2ELoadsTheWorkspaceInstructions proves the managed overlay carries
+// Solo's system prompt into a real agent: the workspace instructions file tells
+// the model a codeword, and the codeword can only come back if DSH loaded that
+// file, which the profile does only because the overlay names it.
+func TestDshAcpE2ELoadsTheWorkspaceInstructions(t *testing.T) {
+	bin, _ := dshAcpE2ETarget(t)
+
+	backend := NewDshAcpBackend(bin, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	ps, err := backend.Start(ctx, &ExecuteRequest{
+		AgentID: "agent-instructions-e2e",
+		Messages: []Message{{
+			Role:    RoleUser,
+			Content: "What is the codeword? Reply with the codeword only.",
+		}},
+	}, &ExecuteOptions{
+		WorkspaceDir: t.TempDir(),
+		SystemPrompt: "You are a test agent. When the user asks for the codeword, reply with exactly " +
+			dshAcpE2EInstructionMarker + " and nothing else.",
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer backend.Close(ps)
+
+	_, result := readDshAcpTurn(t, ps)
+	if result.Status != "completed" {
+		t.Fatalf("result = %+v, want a completed turn", result)
+	}
+	if !strings.Contains(result.Output, dshAcpE2EInstructionMarker) {
+		t.Fatalf("answer = %q, want it to contain %q, which only the workspace instructions carry",
+			result.Output, dshAcpE2EInstructionMarker)
 	}
 }
 

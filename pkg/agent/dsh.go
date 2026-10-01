@@ -95,10 +95,14 @@ func dshLaunch(executablePath string) (string, []string, error) {
 
 // dshLaunchProfile resolves the executable and argument list for one DSH
 // profile. Both transports share the resolution so a launcher script behaves
-// identically on either protocol.
-func dshLaunchProfile(executablePath, profile string) (string, []string, error) {
+// identically on either protocol, and leadingPatches are applied before the
+// DSH_PATCH overlay so an operator's own layer still wins.
+func dshLaunchProfile(executablePath, profile string, leadingPatches ...string) (string, []string, error) {
 	target := strings.TrimSpace(executablePath)
 	args := []string{"--profile", profile}
+	for _, patch := range leadingPatches {
+		args = append(args, "--patch", patch)
+	}
 	if patch := strings.TrimSpace(os.Getenv("DSH_PATCH")); patch != "" {
 		args = append(args, "--patch", patch)
 	}
@@ -141,7 +145,9 @@ const dshDefaultPermissionMode = "danger-full-access"
 // dshEnvironment adds the variables DSH needs beyond the inherited environment.
 //
 // DSH_HOME is passed through so the Daemon and DSH agree on where credentials,
-// settings and session logs live.
+// settings and session logs live. A caller-supplied value wins, then the process
+// environment, then the home default, matching how startPersistent merges this
+// map over the inherited environment.
 //
 // DSH_PERMISSION_MODE is set because the launcher has no permission flag: the
 // mode is read from the environment when a session is created. An operator- or
@@ -151,9 +157,11 @@ func dshEnvironment(extra map[string]string) map[string]string {
 	for key, value := range extra {
 		env[key] = value
 	}
-	if _, ok := os.LookupEnv("DSH_HOME"); !ok {
-		if home, err := os.UserHomeDir(); err == nil {
-			env["DSH_HOME"] = filepath.Join(home, ".dsh")
+	if _, provided := env["DSH_HOME"]; !provided {
+		if _, inherited := os.LookupEnv("DSH_HOME"); !inherited {
+			if home, err := os.UserHomeDir(); err == nil {
+				env["DSH_HOME"] = filepath.Join(home, ".dsh")
+			}
 		}
 	}
 	if _, ok := env["DSH_PERMISSION_MODE"]; !ok {
