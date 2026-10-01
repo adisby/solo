@@ -405,11 +405,20 @@ func (h *daemonHandler) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "message_send" || req.Action == "message_read" || req.Action == "message_check" {
 		runtimeNodeID, err := h.activeThinkingNodeID(req.AgentID)
 		if err != nil {
+			slog.Warn("proxy: rejected message action",
+				"reason", "ambiguous Thinking runtime route",
+				"agent_id", req.AgentID, "action", req.Action,
+				"channel_id", req.ChannelID, "node_id", req.NodeID, "error", err)
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "ambiguous Thinking runtime route"})
 			return
 		}
 		if runtimeNodeID != "" {
 			if req.NodeID != "" && req.NodeID != runtimeNodeID {
+				slog.Warn("proxy: rejected message action",
+					"reason", "Thinking node route conflicts with active runtime",
+					"agent_id", req.AgentID, "action", req.Action,
+					"channel_id", req.ChannelID,
+					"request_node_id", req.NodeID, "active_node_id", runtimeNodeID)
 				writeJSON(w, http.StatusConflict, map[string]string{"error": "Thinking node route conflicts with active runtime"})
 				return
 			}
@@ -430,6 +439,15 @@ func (h *daemonHandler) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	_, token := h.taskManager.ExecutingCredential(req.AgentID, credentialChannel, req.NodeID)
 	if token == "" {
+		// The Run attribution is the only thing that makes an Agent's CLI call
+		// trustworthy, so a refusal here is worth explaining: an Agent that keeps
+		// retrying a 409 burns its whole turn, which is hard to diagnose from the
+		// status code alone.
+		slog.Warn("proxy: rejected message action",
+			"reason", "no unique executing Run",
+			"agent_id", req.AgentID, "action", req.Action,
+			"channel_id", credentialChannel, "node_id", req.NodeID,
+			"agent_tasks", h.taskManager.DescribeAgentTasks(req.AgentID))
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "this command must run during one active Agent turn; no unique current Run was found",
 		})
@@ -1365,6 +1383,16 @@ func (h *daemonHandler) processTaskWithBackend(ctx context.Context, req runTaskR
 		sessionMessages = append([]agent.Message{contextMessage}, sessionMessages...)
 		sessionColdStartMessages = append([]agent.Message{contextMessage}, sessionColdStartMessages...)
 	}
+
+	// The Run is now executing, so mark it as such before the turn starts rather
+	// than after the backend begins streaming. Acquiring a persistent session
+	// can drive the whole turn before it returns (a reused live session goes
+	// through backend.Send, which blocks until session/prompt settles), and the
+	// proxy authorizes an Agent's own CLI calls only against running/thinking
+	// Runs. Marking this afterwards left the Run queued for the entire turn, so
+	// every delivery the Agent attempted was refused with a 409 and the turn
+	// never settled.
+	h.taskManager.UpdateStatus(req.TaskID, taskStatusRunning)
 
 	// v1.3: Session-aware dispatch. Thinking nodes use a node-scoped pool key
 	// while retaining the real Agent identity, workspace, and configuration.

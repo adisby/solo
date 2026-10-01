@@ -19,6 +19,12 @@ const daemonLogPath = join(process.cwd(), '..', 'daemon.log');
 const e2eAgentProvider = process.env.SOLO_E2E_AGENT_PROVIDER?.trim() || 'claude';
 const e2eAgentModel = process.env.SOLO_E2E_MODEL?.trim()
   || (e2eAgentProvider === 'dsh' ? 'deepseek-v4-flash' : 'sonnet');
+// The idle reaper puts a Session to sleep by closing the provider process
+// through backend.Close, and every backend names that moment differently. The
+// assertion has to follow the selected runtime instead of assuming claude.
+const providerCloseLogMessage = e2eAgentProvider === 'dsh'
+  ? 'dsh: ACP session closed'
+  : 'claude: persistent session closed';
 
 let activeWorkspaceID = '';
 let activeUserID = '';
@@ -295,7 +301,7 @@ async function expectAgentSessionSleptAfterRun(runID: string, sessionKey: string
       line.includes('"msg":"session: sleeping idle Agent process"')
       && line.includes(`"session_key":"${sessionKey}"`))
       && lines.some((line) =>
-        line.includes('"msg":"claude: persistent session closed"')
+        line.includes(`"msg":"${providerCloseLogMessage}"`)
         && line.includes(`"session_id":"${providerSessionID}"`));
   }, { timeout: 30000, intervals: [250, 500, 1000] }).toBe(true);
 }
@@ -450,16 +456,48 @@ function rebuildIsolatedE2EStack() {
   if (!daemonID?.startsWith('daemon-e2e-') || !credentialFile) {
     throw new Error('isolated E2E Daemon environment is required before restarting the stack');
   }
-  execFileSync('make', [
+  // Restarting the stack has to reproduce the configuration the harness started
+  // it with. Without these the frontend falls back to whatever the machine's
+  // .env says — on a host that points NEXT_PUBLIC_API_URL at a remote or tailnet
+  // origin, the restarted frontend then calls an API the test browser cannot
+  // reach, and every later assertion fails on an unauthenticated login page.
+  const serverPort = process.env.SERVER_PORT?.trim() || '8080';
+  const daemonPort = process.env.DAEMON_PORT?.trim() || '8081';
+  const frontendPort = process.env.FRONTEND_PORT?.trim() || '3000';
+  const corsOrigins = `http://localhost:${frontendPort},http://127.0.0.1:${frontendPort}`;
+  const args = [
     'rebuild', 'SOLO_DAEMON_PROFILE=',
     `DAEMON_SERVER_URL=${apiBase}`,
     `DAEMON_ID=${daemonID}`,
     `SOLO_DAEMON_CREDENTIAL_FILE=${credentialFile}`,
     `SOLO_DAEMON_STATE_DIR=${process.env.SOLO_DAEMON_STATE_DIR}`,
+    `SERVER_PORT=${serverPort}`,
+    `DAEMON_PORT=${daemonPort}`,
+    `FRONTEND_PORT=${frontendPort}`,
+    `NEXT_PUBLIC_API_URL=${apiBase}`,
+    `CORS_ALLOWED_ORIGINS=${corsOrigins}`,
     'SOLO_COMPUTER_ID=',
     'SOLO_COMPUTER_CREDENTIAL=',
     'SOLO_ENROLLMENT_TOKEN=',
-  ], { cwd: '..', stdio: 'inherit' });
+  ];
+  // The harness only forwards these when the caller set them; forwarding the
+  // same set keeps a restart from silently dropping an idle TTL or the internal
+  // token secret the running stack was started with.
+  for (const key of [
+    'INTERNAL_TOKEN_SECRET',
+    'AGENT_SESSION_IDLE_TTL',
+    'THINKING_SESSION_IDLE_TTL',
+    'SESSION_IDLE_SWEEP_INTERVAL',
+    'AGENT_SEND_RATE_LIMIT',
+    'AGENT_SEND_RATE_WINDOW',
+    'AGENT_CASCADE_THRESHOLD',
+    'AGENT_CASCADE_WINDOW',
+    'AGENT_CASCADE_COOLDOWN',
+  ]) {
+    const value = process.env[key];
+    if (value) args.push(`${key}=${value}`);
+  }
+  execFileSync('make', args, { cwd: '..', stdio: 'inherit' });
 }
 
 test.describe('real Agent result delivery contract', () => {

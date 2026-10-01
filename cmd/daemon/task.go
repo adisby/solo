@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 )
@@ -252,6 +254,30 @@ func (tm *taskManager) ExecutingCredential(agentID, channelID, nodeID string) (s
 		token = t.AgentToken
 	}
 	return runID, token
+}
+
+// DescribeAgentTasks summarises this Agent's retained tasks for proxy
+// diagnostics. ExecutingCredential returns an empty token both when nothing
+// matches and when several Runs match, and the status code alone cannot say
+// which — an Agent that keeps retrying the resulting 409 burns its whole turn.
+func (tm *taskManager) DescribeAgentTasks(agentID string) []string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	summaries := make([]string, 0, len(tm.tasks))
+	for id, t := range tm.tasks {
+		if t.AgentID != agentID {
+			continue
+		}
+		label := id
+		if len(label) > 8 {
+			label = label[:8]
+		}
+		summaries = append(summaries, fmt.Sprintf("%s status=%s channel=%s node=%q token=%t",
+			label, t.Status, t.ChannelID, t.NodeID, t.AgentToken != ""))
+	}
+	sort.Strings(summaries)
+	return summaries
 }
 
 // --- SSE subscriber management ---
