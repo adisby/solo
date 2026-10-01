@@ -3,6 +3,7 @@ package agent
 import (
 	"log/slog"
 	"os"
+	"strings"
 )
 
 func persistentCapabilities(safeStop CapabilityStatus) BackendCapabilities {
@@ -148,23 +149,44 @@ func init() {
 		Capabilities:      oneShotCapabilities(),
 	}, piFactory)
 
-	// ── dsh — DeepSeek Harness via its SDK JSON-RPC runtime ─────────
+	// ── dsh — DeepSeek Harness over ACP or its SDK JSON-RPC runtime ─
 	// DSH_BIN normally points at a .js entry point. On POSIX that script runs
 	// through its own shebang; Windows has no shebang support, so the script
-	// resolver turns it into a node invocation.
-	r.RegisterWithScriptResolver(AdapterMeta{
+	// resolver turns it into a node invocation. The metadata follows the
+	// transport SOLO_DSH_PROTOCOL selects, because protocols and capabilities
+	// differ between them.
+	r.RegisterWithScriptResolver(dshMeta(), dshFactory, resolveScriptCommand)
+}
+
+// dshProtocol names the transport the dsh adapter speaks. ACP is opt-in until it
+// becomes the default; any other value keeps the SDK JSON-RPC runtime.
+func dshProtocol() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SOLO_DSH_PROTOCOL")), "acp") {
+		return "acp"
+	}
+	return "sdk"
+}
+
+// dshMeta describes the dsh adapter for the selected transport.
+func dshMeta() AdapterMeta {
+	meta := AdapterMeta{
 		Type:              "dsh",
 		DisplayName:       "DeepSeek Harness",
 		RequiresBinary:    "dsh",
 		DetectCommand:     "--version",
 		BinaryOverrideEnv: []string{"DSH_BIN"},
-		Protocols:         []string{"json-rpc"},
 		Capabilities:      dshCapabilities(),
-	}, dshFactory, resolveScriptCommand)
+		Protocols:         []string{"json-rpc"},
+	}
+	if dshProtocol() == "acp" {
+		meta.Protocols = []string{"acp"}
+		meta.Capabilities = dshAcpCapabilities()
+	}
+	return meta
 }
 
-// dshCapabilities describes what this adapter integrates, not what DSH could do
-// on its own.
+// dshCapabilities describes what the SDK JSON-RPC transport integrates, not what
+// DSH could do on its own.
 //
 // Persistent conversation, resume and token usage are supported: the adapter
 // reuses one DSH session id across Send calls and reads the turn's usage chunk.
@@ -183,6 +205,28 @@ func dshCapabilities() BackendCapabilities {
 		SafeStop:               CapabilityUnsupported,
 		InteractiveInput:       CapabilityUnsupported,
 		TokenUsage:             CapabilitySupported,
+	}
+}
+
+// dshAcpCapabilities describes what the ACP transport integrates.
+//
+// Resume is protocol-level: session/new mints the DSH session id and
+// session/resume restores it, so a sleeping or restarted process continues the
+// same conversation. Stop cancels the active turn through session/cancel and
+// keeps the process, so an interrupted Agent is safe to steer again.
+//
+// Token usage is unknown rather than supported: ACP carries the turn's counters
+// only from a DSH build that returns them, and every turn still reports context
+// occupancy through usage_update. Busy message delivery and interactive input
+// stay unsupported because ACP admits one prompt per session.
+func dshAcpCapabilities() BackendCapabilities {
+	return BackendCapabilities{
+		PersistentConversation: CapabilitySupported,
+		ResumeConversation:     CapabilitySupported,
+		BusyMessageDelivery:    CapabilityUnsupported,
+		SafeStop:               CapabilitySupported,
+		InteractiveInput:       CapabilityUnsupported,
+		TokenUsage:             CapabilityUnknown,
 	}
 }
 
@@ -283,5 +327,9 @@ func piFactory(cfg BackendConfig) (Backend, error) {
 
 func dshFactory(cfg BackendConfig) (Backend, error) {
 	execPath := execPathOrDefault(cfg.ExecPath, "DSH_BIN")
-	return NewDshBackend(execPath, logOrDefault(cfg.Logger)), nil
+	logger := logOrDefault(cfg.Logger)
+	if dshProtocol() == "acp" {
+		return NewDshAcpBackend(execPath, logger), nil
+	}
+	return NewDshBackend(execPath, logger), nil
 }

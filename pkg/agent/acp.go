@@ -40,14 +40,19 @@ type acpInitialPromptTurn struct {
 	client       *acpClient
 	turns        *acpTurnController
 	turn         *acpRuntimeTurn
+	// stopStatus maps the prompt response's stop reason to a Solo turn status
+	// and failure message. A nil value reports every settled prompt as
+	// completed, which is what the adapters that ignore stop reasons do.
+	stopStatus func(stopReason string) (status, message string)
 }
 
 func startACPInitialPromptTurn(turn acpInitialPromptTurn) {
 	go func() {
-		if _, err := turn.client.request(turn.ctx, "session/prompt", map[string]any{
+		result, err := turn.client.request(turn.ctx, "session/prompt", map[string]any{
 			"sessionId": turn.sessionID,
 			"prompt":    turn.promptBlocks,
-		}); err != nil {
+		})
+		if err != nil {
 			msg := fmt.Sprintf("%s session/prompt failed: %v", turn.provider, err)
 			if errors.Is(turn.ctx.Err(), context.DeadlineExceeded) {
 				msg = fmt.Sprintf("%s timed out during initial prompt", turn.provider)
@@ -58,8 +63,23 @@ func startACPInitialPromptTurn(turn acpInitialPromptTurn) {
 			return
 		}
 
-		turn.turns.finish(turn.turn, "completed", "")
+		status, message := "completed", ""
+		if turn.stopStatus != nil {
+			status, message = turn.stopStatus(extractACPStopReason(result))
+		}
+		turn.turns.finish(turn.turn, status, message)
 	}()
+}
+
+// extractACPStopReason reads the standard stopReason of a prompt response.
+func extractACPStopReason(result json.RawMessage) string {
+	var r struct {
+		StopReason string `json:"stopReason"`
+	}
+	if err := json.Unmarshal(result, &r); err != nil {
+		return ""
+	}
+	return r.StopReason
 }
 
 func acpPromptErrorStatus(ctx context.Context) string {
@@ -117,6 +137,15 @@ func (t *acpRuntimeTurn) emit(chunk OutputChunk) {
 		return
 	}
 	trySend(t.msgCh, chunk)
+}
+
+// setModel names the model this turn reports usage under. A backend that learns
+// the exact route from the session configuration sets it once the session
+// exists; turns created before that start with the requested model.
+func (t *acpRuntimeTurn) setModel(model string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.model = model
 }
 
 func (t *acpRuntimeTurn) recordPromptDone(pr acpPromptResult) {
@@ -1117,6 +1146,25 @@ func (cfg acpSessionConfig) effortValue(effort string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// currentModelName names the session's current model for usage reporting: the
+// model element of an opaque JSON pair, or the advertised display name of the
+// current value.
+func (cfg acpSessionConfig) currentModelName() string {
+	option, ok := cfg[acpModelConfigID]
+	if !ok || option.CurrentValue == "" {
+		return ""
+	}
+	if pair, ok := decodeACPModelPair(option.CurrentValue); ok {
+		return pair.model
+	}
+	for _, candidate := range option.Options {
+		if candidate.Value == option.CurrentValue && candidate.Name != "" {
+			return candidate.Name
+		}
+	}
+	return ""
 }
 
 // decodeACPModelPair decodes an opaque model value as a provider/model pair.

@@ -79,7 +79,8 @@ func (b *DshBackend) Name() string { return "dsh" }
 
 // ── Process launch ───────────────────────────────────────────────────────────
 
-// dshLaunch resolves the executable and full argument list for one DSH process.
+// dshLaunch resolves the executable and full argument list for one DSH process
+// running the SDK profile.
 //
 // DSH is normally started as `dsh --profile sdk`, but a source checkout only
 // exposes the launcher script, so a .js entry point goes through the shared
@@ -89,8 +90,15 @@ func (b *DshBackend) Name() string { return "dsh" }
 // The permission mode is NOT an argument: the launcher rejects
 // --permission-mode, so dshEnvironment passes it as DSH_PERMISSION_MODE.
 func dshLaunch(executablePath string) (string, []string, error) {
+	return dshLaunchProfile(executablePath, dshProfile)
+}
+
+// dshLaunchProfile resolves the executable and argument list for one DSH
+// profile. Both transports share the resolution so a launcher script behaves
+// identically on either protocol.
+func dshLaunchProfile(executablePath, profile string) (string, []string, error) {
 	target := strings.TrimSpace(executablePath)
-	args := []string{"--profile", dshProfile}
+	args := []string{"--profile", profile}
 	if patch := strings.TrimSpace(os.Getenv("DSH_PATCH")); patch != "" {
 		args = append(args, "--patch", patch)
 	}

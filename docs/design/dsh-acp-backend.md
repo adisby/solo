@@ -135,7 +135,7 @@ New backend `pkg/agent/dsh_acp.go` (keeping `DshBackend` for one release behind 
 - **Cancel** — `acpClient.cancel(sessionId)` sending the `session/cancel` notification, a `Stop` that settles the turn as `cancelled`, and `Capabilities.SafeStop = supported`. Cancel must work for both `Start`- and `Send`-produced sessions.
 - **Config options** — `session/set_config_option` helper plus a mapping from `ExecuteOptions.Model`/`Effort` to the advertised option values. Unknown model or unavailable effort fails the turn with a clear message (parity with the SDK `initialize` handshake, which rejects prompts until the exact route resolves).
 - **Resume params** — always send `{sessionId, cwd, mcpServers: []}`; `session/resume` verification of the canonical workspace means `cwd` is part of the resume key.
-- **Initialize negotiation** — read `agentCapabilities` and fail loud when `sessionCapabilities.resume` is missing, so a regression can never silently cold-start.
+- **Initialize negotiation** — read `agentCapabilities` and refuse a requested resume when the agent advertises no `sessionCapabilities.resume`, so a stored session is never silently replaced by a fresh one. A first turn that asks for no resume still runs against an agent without resume support.
 - **Permission** — answer `session/request_permission` with the first allow-shaped option from the request's own `options[]` instead of the hardcoded `approve_for_session` (`pkg/agent/acp.go:386-395`); the daemon is unattended, so it never escalates to a human.
 
 Capability table for the `dsh` adapter (`pkg/agent/builtins.go:178-187`):
@@ -243,7 +243,7 @@ Prerequisites for the remaining phases:
 
 Remaining phases and their entry points:
 
-1. **Phase 2** — `pkg/agent/dsh_acp.go` behind `SOLO_DSH_PROTOCOL`; rewrite the ACP fake runtime in `pkg/agent/dsh_helper_test.go`; add the `dsh` row to `TestStableACPPersistentProviderTurnContract`; update the capability table in `pkg/agent/builtins.go`.
+1. **Phase 2** — `pkg/agent/dsh_acp.go` behind `SOLO_DSH_PROTOCOL`; a Go ACP fixture runtime in `pkg/agent/dsh_acp_helper_test.go` (the SDK fixture stays, because both transports coexist until phase 7); the `dsh` row in `TestStableACPPersistentProviderTurnContract`; the capability table in `pkg/agent/builtins.go`; and an optional `stopStatus` mapping so a cancelled turn reports `cancelled` instead of `completed` without changing the other ACP adapters.
 2. **Phase 3** — extend `pkg/agent/dsh_e2e_test.go` (`SOLO_E2E_DSH=1`) to prove cross-process resume and a single session artifact.
 3. **Phase 4** — the `agent_sessions` retirement migration and the dispatch tests against real PostgreSQL.
 4. **Phase 5** — overlay provisioning in the daemon and the `docs/dsh-backend.md` rewrite.

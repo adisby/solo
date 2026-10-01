@@ -1,0 +1,470 @@
+package agent
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+)
+
+// DshAcpBackend runs a Solo Agent on DeepSeek Harness over the Agent Client
+// Protocol (`dsh --profile acp`).
+//
+// It differs from DshBackend, the SDK JSON-RPC transport, in who owns the
+// provider session identity. Here `session/new` mints the DSH session id and
+// `session/resume` restores it, so one Solo Agent keeps a single DSH
+// conversation across pool sleep, provider crashes and Daemon restarts. Stop
+// cancels the active turn through `session/cancel` and leaves the process and
+// the session alive, so an interrupted turn resumes in the same conversation.
+type DshAcpBackend struct {
+	executablePath string
+	logger         *slog.Logger
+	// launchArgs overrides the arguments a launch would otherwise build. Tests
+	// use it to run a fixture runtime in place of a real DSH process; a nil
+	// value means the standard `--profile acp` invocation.
+	launchArgs []string
+}
+
+// dshAcpProfile is the shipped DSH profile that serves ACP over stdio.
+const dshAcpProfile = "acp"
+
+// dshAcpBlockedArgs keeps caller-supplied arguments from replacing the profile
+// or the overlays this backend owns.
+var dshAcpBlockedArgs = map[string]blockedArgMode{
+	"--profile": blockedWithValue,
+	"--patch":   blockedWithValue,
+}
+
+// NewDshAcpBackend creates an ACP transport for DSH. An empty executablePath
+// means "dsh" is resolved from PATH; otherwise the value may be a DSH launcher
+// script, which runs through node.
+func NewDshAcpBackend(executablePath string, logger *slog.Logger) *DshAcpBackend {
+	if executablePath == "" {
+		executablePath = "dsh"
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &DshAcpBackend{executablePath: executablePath, logger: logger}
+}
+
+// Name returns "dsh": both transports register one adapter type.
+func (b *DshAcpBackend) Name() string { return "dsh" }
+
+// resolveLaunch returns the executable and arguments for one process, honouring
+// an injected launch override and appending the caller's own arguments after
+// the blocked ones are removed.
+func (b *DshAcpBackend) resolveLaunch(opts *ExecuteOptions) (string, []string, error) {
+	if b.launchArgs != nil {
+		resolved, err := exec.LookPath(b.executablePath)
+		if err != nil {
+			return "", nil, fmt.Errorf("dsh executable not found at %q: %w", b.executablePath, err)
+		}
+		return resolved, b.launchArgs, nil
+	}
+	execPath, args, err := dshLaunchProfile(b.executablePath, dshAcpProfile)
+	if err != nil {
+		return "", nil, err
+	}
+	args = append(args, filterCustomArgs(opts.ExtraArgs, dshAcpBlockedArgs)...)
+	args = append(args, filterCustomArgs(opts.CustomArgs, dshAcpBlockedArgs)...)
+	return execPath, args, nil
+}
+
+// ── Persistent state ─────────────────────────────────────────────────────────
+
+// dshAcpPersistentState is the live state of one DSH ACP subprocess across
+// turns.
+type dshAcpPersistentState struct {
+	runner    *persistentRunner
+	client    *acpClient
+	sessionID string
+	model     string
+	turns     acpTurnController
+
+	settleMu sync.Mutex
+	settled  <-chan struct{}
+}
+
+var _ SessionStater = (*dshAcpPersistentState)(nil)
+
+func (s *dshAcpPersistentState) IsAlive() bool           { return s.runner.isAlive() }
+func (s *dshAcpPersistentState) SessionID() string       { return s.sessionID }
+func (s *dshAcpPersistentState) Done() <-chan struct{}   { return s.runner.done }
+func (s *dshAcpPersistentState) Notify(msg string) error { return s.runner.write([]byte(msg)) }
+
+func (s *dshAcpPersistentState) setSettled(done <-chan struct{}) {
+	s.settleMu.Lock()
+	s.settled = done
+	s.settleMu.Unlock()
+}
+
+// turnSettled returns the channel closed when the active turn settles.
+func (s *dshAcpPersistentState) turnSettled() <-chan struct{} {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+	return s.settled
+}
+
+// ── Session opening ──────────────────────────────────────────────────────────
+
+// openSession restores the requested provider session or creates a new one, then
+// applies the requested model and reasoning effort. A resume the agent rejects
+// falls back to exactly one fresh session: a missing DSH log must not fail the
+// turn, and the caller learns the new id from the returned state.
+func (b *DshAcpBackend) openSession(
+	ctx context.Context,
+	cl *acpClient,
+	opts *ExecuteOptions,
+	cwd string,
+	capabilities acpAgentCapabilities,
+) (string, acpSessionConfig, error) {
+	var cfg acpSessionConfig
+	sessionID := strings.TrimSpace(opts.ResumeSessionID)
+	if sessionID != "" {
+		if !capabilities.Resume {
+			return "", nil, fmt.Errorf(
+				"dsh: %q does not advertise session/resume, so the stored session %q cannot be restored; "+
+					"run a dsh whose acp profile supports resuming",
+				b.executablePath, sessionID)
+		}
+		resumed, resumedConfig, err := cl.resumeSession(ctx, sessionID, cwd)
+		if err != nil {
+			b.logger.Warn("dsh: restoring the stored session failed; starting a new one",
+				"session_id", sessionID, "error", err)
+			sessionID = ""
+		} else {
+			sessionID, cfg = resumed, resumedConfig
+			b.logger.Info("dsh: restored provider session", "session_id", sessionID)
+		}
+	}
+	if sessionID == "" {
+		result, err := cl.request(ctx, "session/new", map[string]any{
+			"cwd":        cwd,
+			"mcpServers": []any{},
+		})
+		if err != nil {
+			return "", nil, fmt.Errorf("dsh session/new: %w", err)
+		}
+		sessionID = extractACPSessionID(result)
+		if sessionID == "" {
+			return "", nil, fmt.Errorf("dsh session/new returned no session id")
+		}
+		cfg = parseACPSessionConfig(result)
+		b.logger.Info("dsh: created provider session", "session_id", sessionID)
+	}
+	if err := b.applySelection(ctx, cl, sessionID, opts, cfg); err != nil {
+		return "", nil, err
+	}
+	return sessionID, cfg, nil
+}
+
+// applySelection asks the session for the model and the reasoning effort this
+// run configured. The profile chose the deployment's defaults at session
+// creation, so a request the session does not advertise fails with the
+// advertised choices instead of running a different model than the Agent
+// configured.
+func (b *DshAcpBackend) applySelection(
+	ctx context.Context,
+	cl *acpClient,
+	sessionID string,
+	opts *ExecuteOptions,
+	cfg acpSessionConfig,
+) error {
+	model := strings.TrimSpace(opts.Model)
+	if model != "" {
+		value, ok := cfg.modelValue(model)
+		if !ok {
+			return fmt.Errorf("dsh: session does not offer model %q; it offers %s", model, cfg.describeModels())
+		}
+		updated, err := cl.setConfigOption(ctx, sessionID, acpModelConfigID, value)
+		if err != nil {
+			return fmt.Errorf("dsh: select model %q: %w", model, err)
+		}
+		cfg = updated
+	}
+	effort := strings.TrimSpace(opts.Effort)
+	if effort != "" {
+		value, ok := cfg.effortValue(effort)
+		if !ok {
+			return fmt.Errorf("dsh: session does not offer reasoning effort %q", effort)
+		}
+		if _, err := cl.setConfigOption(ctx, sessionID, acpEffortConfigID, value); err != nil {
+			return fmt.Errorf("dsh: select reasoning effort %q: %w", effort, err)
+		}
+	}
+	return nil
+}
+
+// describeModels lists the advertised model choices for a failure message.
+func (cfg acpSessionConfig) describeModels() string {
+	option, ok := cfg[acpModelConfigID]
+	if !ok || len(option.Options) == 0 {
+		return "no model choices"
+	}
+	names := make([]string, 0, len(option.Options))
+	for _, candidate := range option.Options {
+		switch {
+		case candidate.Name != "":
+			names = append(names, candidate.Name)
+		case candidate.Value != "":
+			names = append(names, candidate.Value)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// ── PersistentBackend ────────────────────────────────────────────────────────
+
+// Start launches a persistent DSH ACP process, restores or creates its session,
+// and issues the first prompt. The handshake completes before Start returns;
+// the initial turn continues asynchronously on the returned channels.
+func (b *DshAcpBackend) Start(ctx context.Context, req *ExecuteRequest, opts *ExecuteOptions) (*PersistentSession, error) {
+	execPath, args, err := b.resolveLaunch(opts)
+	if err != nil {
+		return nil, err
+	}
+	b.logger.Info("dsh: starting ACP session", "exec", execPath, "args", args)
+
+	// The workspace instruction file must exist before DSH boots, because the
+	// instructions plugin captures its baseline on the first request. ACP has no
+	// system-prompt field either, so this file is the only channel.
+	if err := writeDshInstructions(opts.WorkspaceDir, opts.SystemPrompt); err != nil {
+		return nil, err
+	}
+
+	runner, err := startPersistent(ctx, execPath, args, opts.WorkspaceDir, dshEnvironment(opts.Env), b.logger)
+	if err != nil {
+		return nil, err
+	}
+
+	state := &dshAcpPersistentState{runner: runner}
+	turn, turnErr := state.turns.begin(opts.Model)
+	if turnErr != nil {
+		_ = runner.close()
+		return nil, fmt.Errorf("dsh: begin initial turn: %w", turnErr)
+	}
+	state.setSettled(turn.done)
+
+	cl := &acpClient{
+		logger:  b.logger,
+		stdin:   runner.stdin,
+		pending: make(map[int]*pendingRPC),
+	}
+	cl.setCallbacks(state.turns.emit, state.turns.recordPromptDone)
+	state.client = cl
+
+	go func() {
+		defer state.runner.finish()
+		scanner := bufio.NewScanner(runner.stdout)
+		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			cl.handleLine(line)
+		}
+		cl.closeAllPending(fmt.Errorf("dsh process exited"))
+		state.turns.failActive("dsh process exited unexpectedly")
+	}()
+
+	handleError := func(errMsg string) {
+		state.turns.finish(turn, acpPromptErrorStatus(ctx), errMsg)
+	}
+
+	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), 60*time.Second)
+	capabilities, err := cl.initialize(handshakeCtx)
+	if err != nil {
+		cancelHandshake()
+		handleError(fmt.Sprintf("dsh initialize failed: %v", err))
+		_ = runner.close()
+		return nil, fmt.Errorf("dsh persistent initialize: %w", err)
+	}
+
+	cwd := strings.TrimSpace(opts.WorkspaceDir)
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	sessionID, cfg, err := b.openSession(handshakeCtx, cl, opts, cwd, capabilities)
+	cancelHandshake()
+	if err != nil {
+		handleError(err.Error())
+		_ = runner.close()
+		return nil, err
+	}
+
+	provider, requestedModel := dshResolveRoute(opts)
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = cfg.currentModelName()
+	}
+	if model == "" {
+		model = requestedModel
+	}
+	state.sessionID = sessionID
+	state.model = model
+	// The initial turn was created before the session reported its current
+	// model, so name it now: the turn reports usage under this key.
+	turn.setModel(model)
+	b.logger.Info("dsh: ACP session ready",
+		"session_id", sessionID, "provider", provider, "model", model,
+		"resume_advertised", capabilities.Resume)
+
+	startACPInitialPromptTurn(acpInitialPromptTurn{
+		ctx:       ctx,
+		provider:  "dsh",
+		sessionID: sessionID,
+		promptBlocks: []map[string]any{
+			{"type": "text", "text": buildPrompt(req, opts)},
+		},
+		client:     cl,
+		turns:      &state.turns,
+		turn:       turn,
+		stopStatus: dshAcpTurnStatus,
+	})
+
+	return &PersistentSession{
+		Messages:  turn.msgCh,
+		Result:    turn.resCh,
+		Stop:      dshAcpStop(state),
+		SessionID: sessionID,
+		state:     state,
+	}, nil
+}
+
+// Send delivers another prompt on the same DSH ACP session. It returns after the
+// turn settles, so the caller's channels carry the completed turn.
+func (b *DshAcpBackend) Send(ctx context.Context, ps *PersistentSession, messages []Message) (*PersistentSession, error) {
+	state, ok := ps.state.(*dshAcpPersistentState)
+	if !ok || state == nil {
+		return nil, fmt.Errorf("dsh: invalid session state")
+	}
+	if !state.runner.isAlive() {
+		return nil, fmt.Errorf("dsh: session process has exited")
+	}
+
+	turn, err := state.turns.begin(state.model)
+	if err != nil {
+		return nil, fmt.Errorf("dsh: %w", err)
+	}
+	state.setSettled(turn.done)
+
+	result, err := state.client.request(ctx, "session/prompt", map[string]any{
+		"sessionId": state.sessionID,
+		"prompt": []map[string]any{
+			{"type": "text", "text": buildPromptFromMessages(messages)},
+		},
+	})
+	if err != nil {
+		state.turns.finish(turn, acpPromptErrorStatus(ctx), err.Error())
+		return nil, fmt.Errorf("dsh session/prompt: %w", err)
+	}
+	status, message := dshAcpTurnStatus(extractACPStopReason(result))
+	state.turns.finish(turn, status, message)
+
+	b.logger.Info("dsh: ACP turn completed via Send",
+		"session_id", state.sessionID,
+		"duration", time.Since(turn.startedAt).Round(time.Millisecond).String(),
+	)
+
+	return &PersistentSession{
+		Messages:  turn.msgCh,
+		Result:    turn.resCh,
+		Stop:      dshAcpStop(state),
+		SessionID: state.sessionID,
+		state:     state,
+	}, nil
+}
+
+// Close ends the session by closing the child's stdin. A DSH ACP process exits
+// 0 on end of input, so no disposal request is needed.
+func (b *DshAcpBackend) Close(ps *PersistentSession) error {
+	state, ok := ps.state.(*dshAcpPersistentState)
+	if !ok || state == nil {
+		return fmt.Errorf("dsh: invalid session state")
+	}
+	err := state.runner.close()
+	b.logger.Info("dsh: ACP session closed", "session_id", state.sessionID, "reaped", state.runner.exited.Load())
+	return err
+}
+
+// ForceClose kills the DSH subprocess without a graceful exit.
+func (b *DshAcpBackend) ForceClose(ps *PersistentSession) error {
+	state, ok := ps.state.(*dshAcpPersistentState)
+	if !ok || state == nil {
+		return fmt.Errorf("dsh: invalid session state")
+	}
+	err := state.runner.forceClose()
+	b.logger.Info("dsh: ACP session ended", "session_id", state.sessionID, "reaped", state.runner.exited.Load())
+	return err
+}
+
+// Execute runs one prompt in a fresh DSH ACP process and returns its stream.
+func (b *DshAcpBackend) Execute(ctx context.Context, req *ExecuteRequest, opts *ExecuteOptions) (*Session, error) {
+	ps, err := b.Start(ctx, req, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	state, _ := ps.state.(*dshAcpPersistentState)
+	session := &Session{
+		Messages:  ps.Messages,
+		Result:    ps.Result,
+		SessionID: ps.SessionID,
+		Stop:      ps.Stop,
+	}
+
+	// A one-shot execution owns the process: close it once the turn settles.
+	// Waiting on the result channel here would race the caller for the single
+	// value it carries.
+	go func() {
+		if state != nil {
+			<-state.turnSettled()
+			_ = state.runner.close()
+		}
+	}()
+
+	return session, nil
+}
+
+// dshAcpStop implements PersistentSession.Stop by asking DSH to cancel the
+// active turn through session/cancel. The process and the session stay alive, so
+// an interrupted Agent keeps its conversation and the next turn arrives in the
+// same DSH session.
+func dshAcpStop(state *dshAcpPersistentState) func() error {
+	var once sync.Once
+	var err error
+	return func() error {
+		once.Do(func() {
+			if !state.runner.isAlive() {
+				return
+			}
+			err = state.client.cancelSession(state.sessionID)
+		})
+		return err
+	}
+}
+
+// dshAcpTurnStatus maps an ACP stop reason to Solo's turn status. An end_turn is
+// a completed turn, an explicit cancellation keeps Solo's cancelled status so an
+// interrupted Agent is not reported as finished, and every other reason names
+// itself in the failure.
+func dshAcpTurnStatus(stopReason string) (string, string) {
+	switch strings.TrimSpace(stopReason) {
+	case "", "end_turn":
+		return "completed", ""
+	case "cancelled":
+		return "cancelled", ""
+	default:
+		return "failed", "turn ended: " + stopReason
+	}
+}
+
+// Compile-time proof that the ACP transport satisfies the persistent contract.
+var _ PersistentBackend = (*DshAcpBackend)(nil)
