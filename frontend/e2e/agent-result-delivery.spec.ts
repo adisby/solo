@@ -12,6 +12,13 @@ const credentials = {
   password: 'SoloE2E-2026!',
 };
 const daemonLogPath = join(process.cwd(), '..', 'daemon.log');
+// The Agent runtime these scenarios drive. Claude stays the default so the
+// existing targets are unchanged; SOLO_E2E_AGENT_PROVIDER=dsh runs the same
+// continuity scenarios against the DeepSeek Harness adapter, whose sessions are
+// addressed by the model ids its ACP profile advertises.
+const e2eAgentProvider = process.env.SOLO_E2E_AGENT_PROVIDER?.trim() || 'claude';
+const e2eAgentModel = process.env.SOLO_E2E_MODEL?.trim()
+  || (e2eAgentProvider === 'dsh' ? 'deepseek-v4-flash' : 'sonnet');
 
 let activeWorkspaceID = '';
 let activeUserID = '';
@@ -484,8 +491,8 @@ test.describe('real Agent result delivery contract', () => {
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Delivery E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: 'Always use solo message send for visible replies. When asked to introduce yourself, post the introduction. When the user says SECOND, send exactly SECOND_OK. Do not merely print replies.',
       });
 
@@ -541,8 +548,8 @@ test.describe('real Agent result delivery contract', () => {
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Target Resolution E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: [
           'When introducing yourself, use solo message send to send exactly TARGET_RESOLUTION_READY.',
           `When a user message contains NAME_TARGET, first run SOLO_AUTH_TOKEN=expired-provider-session-token solo message read --target '#${channel.name}' --limit 1 > name-read.json and verify the returned messages array has exactly one item containing NAME_TARGET. Only after this actual read succeeds run: SOLO_AUTH_TOKEN=expired-provider-session-token solo message send -c NAME_TARGET_OK --target '#${channel.name}'`,
@@ -664,8 +671,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Template Proxy E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: [
           'Always deliver replies with solo message send.',
           'When introducing yourself, run solo template list --json first. If it succeeds, send exactly TEMPLATE_LIST_FIRST_OK.',
@@ -784,15 +791,15 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       lead = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `RouterLead${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: `When introducing yourself, use solo message send to send exactly LEAD_READY. For a human message beginning ROUTER_E2E_, use solo message send to send exactly ${leadAck}. Send no other visible text.`,
       });
       worker = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `RouterWorker${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: `When introducing yourself, use solo message send to send exactly WORKER_READY. For a human message beginning ROUTER_E2E_, use solo message send to send exactly ${workerAck}. Send no other visible text.`,
       });
       await api(request, auth.access_token, 'post', '/api/v1/agent-relationships', {
@@ -882,8 +889,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Missing Delivery E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         custom_args: ['--tools', ''],
         system_prompt: 'Do not use tools. Respond with exactly INTERNAL_ONLY as plain text and stop.',
       });
@@ -918,8 +925,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Daemon Recovery E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: 'Before introducing yourself, you must run the Bash command `sleep 60` and wait for it to finish. Only then use solo message send. Do not skip the wait.',
       });
 
@@ -963,8 +970,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Channel Session Resume E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: [
           'Always deliver replies with solo message send.',
           'When introducing yourself, send exactly READY.',
@@ -1037,8 +1044,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Channel Idle Resume E2E ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: [
           'Always deliver replies with solo message send.',
           'When introducing yourself, send exactly READY.',
@@ -1125,15 +1132,15 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       failingAgent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `FailingWorker${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: 'For every Task, first run the Bash command `sleep 60` and wait for it to finish. Only then use solo message send once with the requested target. Do not skip the wait.',
       });
       succeedingAgent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `SuccessfulWorker${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         system_prompt: 'For a Task, do not submit or close it. Use solo message send exactly once with the target from the request to deliver a concise completed result.',
       });
       task = await api<TaskEntity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/tasks`, {
@@ -1188,8 +1195,8 @@ subprocess.run(['solo','message','send','--target','${channel.id}','-c','CROSS_R
       agent = await api<Entity>(request, auth.access_token, 'post', `/api/v1/channels/${channel.id}/agents`, {
         name: `Misconfigured Worker ${suffix}`,
         computer_id: localComputer.id,
-        model_provider: 'claude',
-        model_name: process.env.SOLO_E2E_MODEL ?? 'sonnet',
+        model_provider: e2eAgentProvider,
+        model_name: e2eAgentModel,
         custom_args: ['--solo-e2e-intentionally-invalid-flag'],
         system_prompt: 'This Task is intentionally used to verify configuration failure handling.',
       });
