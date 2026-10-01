@@ -118,8 +118,10 @@ tokens.
    mounted into Linux reports as mode 777.
 3. **Turn usage (ACP only).** A DSH build whose `session/prompt` response carries
    `usage` gives Solo per-turn token accounting. Without it, `token_usage` stays
-   `unknown` and dsh runs record no tokens; `session/update` still reports context
-   occupancy.
+   `unknown` and every dsh run settles as `usage_unknown`: Solo charges the run's
+   reservation instead of an actual count, so a budget stays conservative rather
+   than silently unspent, and the run reads as unknown rather than as zero.
+   Context occupancy still arrives through `session/update`.
 
 ### Setting up the SDK profile
 

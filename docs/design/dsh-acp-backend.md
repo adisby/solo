@@ -158,7 +158,7 @@ Capability table for the `dsh` adapter (`pkg/agent/builtins.go:178-187`):
 Options:
 
 - **A (recommended) — upstream.** Return the turn's committed usage as ACP `PromptResponse.usage`. The facts already exist: `assistant/message` events carry `usage?: TokenUsage` (`packages/core/session/src/types.ts`), and the ACP bridge already reads `event.data.usage` for `usageUpdate`. Accumulate it per turn and map to `{inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens, totalTokens}` at the two return sites. No Solo change is needed afterwards.
-- **B (interim, mandatory) — declare it.** Until A lands, the adapter reports `token_usage: unknown`, dsh runs record no usage, and the budget gate must treat them explicitly (flagged, not silently unlimited). This is a product decision, not a detail.
+- **B (interim, mandatory) — declare it.** Until A lands, the adapter reports `token_usage: unknown`, and every dsh run settles as `usage_unknown` in the budget ledger: Solo charges that run's reservation (`SettleRunTx`) instead of an actual count, which is the existing conservative path for a run that reports nothing. The only thing lost is exact per-run numbers, so a stock DSH needs no Solo change at all.
 - **C (rejected) — read the DSH session log tail** (`$DSH_HOME/sessions/<cwd-slug>/<id>/session.v*.jsonl.zstd`). Rejected: format versioning (v3 today, v4 exists in the 0.2.0 line), compression variants, slugged paths, and concurrent writers make it a second, silent source of truth.
 
 Rollout gate: the default protocol stays `sdk` until A lands or the product accepts B.
